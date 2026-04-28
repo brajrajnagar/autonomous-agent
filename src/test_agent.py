@@ -434,6 +434,76 @@ def test_feedback_skipped_for_non_matching_tool():
     print("\n✅ Engine produces no output for non-matching tool/file combinations")
 
 
+def test_is_approved_handles_negation():
+    """Test: is_approved correctly rejects 'NOT APPROVED' and similar negations."""
+    print("\n" + "="*60)
+    print("TEST 19: is_approved handles 'NOT APPROVED' correctly")
+    print("="*60)
+    from src.critic import is_approved
+    # Approved cases.
+    assert is_approved("APPROVED")
+    assert is_approved("approved")
+    assert is_approved("Looks great. APPROVED.")
+    assert is_approved("APPROVED (no feedback generated)")
+    # Negated cases — these previously slipped through with substring matching.
+    assert not is_approved("NOT APPROVED")
+    assert not is_approved("Not approved — needs more work.")
+    assert not is_approved("DISAPPROVED")
+    assert not is_approved("This is NOT_APPROVED.")
+    # Non-verdict text.
+    assert not is_approved("")
+    assert not is_approved(None)
+    assert not is_approved("The task needs improvements.")
+    print("\n✅ is_approved correctly distinguishes approval from negation")
+
+
+def test_system_prefix_contains_today():
+    """Test: system_prefix returns today's date in ISO form."""
+    print("\n" + "="*60)
+    print("TEST 20: system_prefix injects today's date")
+    print("="*60)
+    from src.prompts import system_prefix
+    from datetime import datetime
+    prefix = system_prefix()
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert today in prefix, f"expected {today} in prefix, got: {prefix!r}"
+    assert "fabricat" in prefix.lower() or "guess" in prefix.lower(), \
+        "prefix should warn against fabrication/guessing"
+    print(f"\n✅ system_prefix contains {today} and an anti-fabrication clause")
+
+
+def test_planner_prompt_lists_browser_tools():
+    """Test: INITIAL_PLAN_PROMPT mentions web_search/browser_visit so the planner can use them."""
+    print("\n" + "="*60)
+    print("TEST 21: planner prompt advertises web tools")
+    print("="*60)
+    from src.prompts import INITIAL_PLAN_PROMPT
+    formatted = INITIAL_PLAN_PROMPT.format(task="anything")
+    for tool in ("web_search", "browser_visit", "edit_file", "search_in_files", "run_python"):
+        assert tool in formatted, f"INITIAL_PLAN_PROMPT missing {tool}"
+    print("\n✅ Planner prompt lists web_search, browser_visit, and the dev tools")
+
+
+def test_browser_blocked_content_detection():
+    """Test: _looks_blocked flags JS-required / captcha / 403 short pages."""
+    print("\n" + "="*60)
+    print("TEST 22: browser — blocked / JS-required content detected")
+    print("="*60)
+    from src.browser import _looks_blocked
+    # Should flag.
+    assert _looks_blocked("You need to enable JavaScript to view this site.") == "you need to enable javascript"
+    assert _looks_blocked("Access Denied — 403 Forbidden") in ("403 forbidden", "access denied")
+    assert _looks_blocked("Please verify you are a human.\nCheck the box.") == "please verify you are a human"
+    # Should NOT flag — long real article that incidentally mentions JS.
+    long_article = ("Article on JavaScript security. " * 200) + "Check the captcha challenge."
+    assert _looks_blocked(long_article) is None, \
+        "long articles mentioning sentinels in passing should not be flagged"
+    # Empty / short benign.
+    assert _looks_blocked("") is None
+    assert _looks_blocked("Hello world") is None
+    print("\n✅ Blocked-content detection works on JS shells, 403s, and captchas; ignores long articles")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "="*60)
@@ -458,6 +528,12 @@ def run_all_tests():
     test_browser_invalid_url_rejected()
     test_browser_deny_host_blocks_localhost()
     test_browser_pagination_via_offset()
+
+    # Offline correctness fixes (no API).
+    test_is_approved_handles_negation()
+    test_system_prefix_contains_today()
+    test_planner_prompt_lists_browser_tools()
+    test_browser_blocked_content_detection()
 
     input("\nPress Enter to run API-backed tests (or Ctrl+C to stop here)...")
 

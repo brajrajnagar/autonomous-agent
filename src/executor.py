@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from colors import C
 from parsing import hash_action, parse_response
-from prompts import TOOLS_PROMPT
+from prompts import TOOLS_PROMPT, system_prefix
 from state import AgentState, ToolResult
 from tools import Tools
 
@@ -99,7 +99,7 @@ class Executor:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are an autonomous agent. Use tools to complete tasks."},
+                    {"role": "system", "content": system_prefix() + "You are an autonomous agent. Use tools to complete tasks."},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.7,

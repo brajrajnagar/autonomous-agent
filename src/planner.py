@@ -5,7 +5,10 @@ from typing import Any, Dict, List, Optional
 
 from colors import C
 from parsing import safe_json_parse
-from prompts import INITIAL_PLAN_PROMPT, PLAN_CRITIQUE_PROMPT, PLAN_REFINE_PROMPT
+from prompts import (
+    INITIAL_PLAN_PROMPT, PLAN_CRITIQUE_PROMPT, PLAN_REFINE_PROMPT,
+    system_prefix,
+)
 
 
 class Planner:
@@ -36,7 +39,7 @@ class Planner:
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": system_msg},
+                {"role": "system", "content": system_prefix() + system_msg},
                 {"role": "user", "content": user_msg},
             ],
             temperature=temperature,

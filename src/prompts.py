@@ -2,7 +2,28 @@
 
 The planning prompts use `str.format()` placeholders, so JSON example braces
 in the templates are escaped as `{{` / `}}`.
+
+`system_prefix()` returns a small dynamic block (today's date) prepended to
+every system message — this prevents the model from fabricating future
+content or claiming ignorance of the present moment.
 """
+
+from datetime import datetime
+
+
+def system_prefix() -> str:
+    """Common system-message prefix injected before each LLM call.
+
+    Date-grounds the model so it doesn't fabricate future events or claim
+    its training cutoff is "now". Re-evaluated each call so long-running
+    sessions stay accurate.
+    """
+    return (
+        f"Today's date is {datetime.now().strftime('%Y-%m-%d')}. "
+        "Only claim facts about events on or before this date. If you do not "
+        "know whether something happened, say so explicitly rather than "
+        "guessing or fabricating dates / IDs / names.\n\n"
+    )
 
 
 TOOLS_PROMPT = """
@@ -37,7 +58,19 @@ Constraints:
 - Maximum 8 steps. If trivial, 1 step is fine.
 - Each step must be independently verifiable (give a concrete success_criterion).
 - Order steps by dependency.
-- Use the agent's tools (execute_shell, read_file, write_file, list_directory) — no external services.
+
+The execution agent has these tools available — plan in terms of them:
+- execute_shell: run any shell command
+- read_file / write_file / edit_file: file I/O. Prefer edit_file for small changes.
+- list_directory / search_in_files: discover files and find code/text by regex
+- run_python: run Python code or a script (no shell-quoting required)
+- web_search: search the web (DuckDuckGo)
+- browser_visit: HTTP-fetch a URL and read its main content as Markdown
+
+Rules of thumb:
+- For "latest" / "current" / "news" tasks → web_search first, then browser_visit on the most relevant URL. Do not invent URLs; only visit URLs returned by web_search or supplied by the user.
+- For research tasks, cap source visits to 5–7 and require citations.
+- Do not say "browsing is not permitted" — these tools exist; use them.
 
 Respond with strict JSON only (no prose, no markdown fences):
 {{"summary": "...", "steps": [{{"id": 1, "description": "...", "success_criterion": "..."}}, ...]}}

@@ -115,7 +115,8 @@ class SessionLogger:
     # ---- Report rendering ---------------------------------------------------
 
     def _render_report(self, result: str, critic_verdict: str) -> str:
-        approved = "APPROVED" in critic_verdict.upper()
+        from critic import is_approved
+        approved = is_approved(critic_verdict)
         outcome = "✅ APPROVED" if approved else "⚠️ NEEDS WORK"
         duration = self.events[-1].elapsed_s if self.events else 0.0
 

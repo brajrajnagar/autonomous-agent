@@ -22,7 +22,7 @@ _project_root = os.path.dirname(_script_dir)
 load_dotenv(os.path.join(_project_root, "config", ".env"))
 
 from colors import C
-from critic import Critic
+from critic import Critic, is_approved
 from executor import Executor
 from feedback import make_feedback_engine
 from planner import Planner
@@ -105,7 +105,7 @@ class AutonomousAgent:
         critic_feedback = self.critic.review(task, result, self.state.action_history)
         print(f"{C.BOLD}Critic:{C.RESET} {critic_feedback}")
 
-        if "APPROVED" in critic_feedback.upper():
+        if is_approved(critic_feedback):
             print(C.ok("✅ Output approved by critic"))
         else:
             print(C.warn("⚠️ Critic suggested improvements"))

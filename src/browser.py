@@ -15,7 +15,7 @@ work fine without it. Add Playwright in a follow-up if you hit a real wall.
 import hashlib
 import os
 import urllib.parse
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import requests
 import trafilatura
@@ -33,6 +33,43 @@ _REQUEST_TIMEOUT = 20
 # Per-process URL cache: { url_hash -> full extracted markdown }.
 # Resets on every Python invocation, which matches the "per-session" scope.
 _URL_CACHE: Dict[str, str] = {}
+
+# Phrases that indicate the page didn't actually deliver content (paywall,
+# JS-required app shell, captcha challenge, rate-limit page, etc.). When
+# the *extracted* content is short and matches one of these, we treat the
+# fetch as failed so the agent picks a different source instead of citing
+# garbage as if it were an article. Keep these specific to avoid flagging
+# real articles that mention "captcha" or "javascript" in passing.
+_BLOCK_SENTINELS = (
+    "you need to enable javascript",
+    "javascript is required",
+    "please enable javascript",
+    "enable javascript to view",
+    "checking your browser",
+    "please verify you are a human",
+    "are you a robot",
+    "access denied",
+    "403 forbidden",
+    "rate limit exceeded",
+    "too many requests",
+    "cloudflare",  # paired with shortness check below
+    "captcha",
+)
+# Only flag content as "blocked" if it's short — long pages that
+# legitimately mention these phrases in body text shouldn't trip the check.
+_BLOCK_MAX_CHARS = 1500
+
+
+def _looks_blocked(content: str) -> Optional[str]:
+    """If the extracted content matches a known block/JS-required sentinel
+    AND is short, return the matched phrase. Else None."""
+    if not content or len(content) > _BLOCK_MAX_CHARS:
+        return None
+    lower = content.lower()
+    for phrase in _BLOCK_SENTINELS:
+        if phrase in lower:
+            return phrase
+    return None
 
 
 def _deny_hosts() -> List[str]:
@@ -115,6 +152,17 @@ def visit_url(url: str, max_chars: int = 4000, offset: int = 0) -> ToolResult:
             body = soup.get_text(separator="\n", strip=True)
             extracted = f"# {title}\n\n{body}" if title else body
         full = extracted or "(no extractable content)"
+
+        # If the page came back as a JS-required shell, paywall, captcha,
+        # or rate-limit page, treat it as a fetch failure so the agent
+        # tries a different source instead of citing the boilerplate.
+        blocked = _looks_blocked(full)
+        if blocked:
+            return ToolResult(
+                success=False, output="",
+                error=(f"Page blocked or JS-required (matched '{blocked}'): {url}. "
+                       f"Try a different source — this URL won't yield article content."),
+            )
         _URL_CACHE[key] = full
 
     total = len(full)
