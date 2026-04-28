@@ -246,4 +246,22 @@ class Executor:
             )
         if tool_name == "list_directory":
             return self.tools.list_directory(parameters.get("path", "."))
+        if tool_name == "search_in_files":
+            return self.tools.search_in_files(
+                parameters.get("pattern", ""),
+                parameters.get("path", "."),
+                parameters.get("file_glob", "*"),
+            )
+        if tool_name == "edit_file":
+            return self.tools.edit_file(
+                parameters.get("path", ""),
+                parameters.get("old_string", ""),
+                parameters.get("new_string", ""),
+            )
+        if tool_name == "run_python":
+            return self.tools.run_python(
+                code=parameters.get("code", ""),
+                script_path=parameters.get("script_path", ""),
+                timeout=int(parameters.get("timeout", 120)),
+            )
         return ToolResult(success=False, output="", error=f"Unknown tool: {tool_name}")

@@ -6,11 +6,13 @@ This script tests the agent with a simple task to verify it's working correctly.
 
 import sys
 import os
+import tempfile
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.agent import AutonomousAgent
+from src.tools import Tools
 
 
 def test_list_directory():
@@ -159,16 +161,116 @@ def test_planning_disabled_falls_back_to_legacy():
     return result
 
 
+def test_search_in_files():
+    """Test: search_in_files finds a known string in this project (no API call)."""
+    print("\n" + "="*60)
+    print("TEST 8: search_in_files")
+    print("="*60)
+    # Tool requires relative paths — run from the agent project root.
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    old_cwd = os.getcwd()
+    os.chdir(project_root)
+    try:
+        # `Tools` class definition itself contains "class Tools" — a stable target.
+        result = Tools.search_in_files(r"class Tools", path="src", file_glob="*.py")
+        print("\n", result.output[:300])
+        assert result.success, f"search failed: {result.error}"
+        assert "tools.py" in result.output, "expected tools.py in matches"
+    finally:
+        os.chdir(old_cwd)
+    print("\n✅ search_in_files found 'class Tools' in tools.py")
+
+
+def test_edit_file():
+    """Test: edit_file replaces a unique string and rejects non-unique matches."""
+    print("\n" + "="*60)
+    print("TEST 9: edit_file")
+    print("="*60)
+    with tempfile.TemporaryDirectory() as td:
+        # tempfile gives an absolute path, but tools require relative — chdir into td.
+        old_cwd = os.getcwd()
+        os.chdir(td)
+        try:
+            with open("sample.txt", "w") as f:
+                f.write("hello world\nhello again\n")
+
+            # Unique-match path: edit "hello world" → "hi world".
+            r = Tools.edit_file("sample.txt", "hello world", "hi world")
+            assert r.success, f"unique edit failed: {r.error}"
+            with open("sample.txt") as f:
+                content = f.read()
+            assert content == "hi world\nhello again\n", f"unexpected content: {content!r}"
+
+            # Non-unique-match path: "hello" appears twice now ("hi world" + "hello again")
+            # — actually only once. Let's make it twice deliberately.
+            with open("sample.txt", "w") as f:
+                f.write("foo\nfoo\n")
+            r2 = Tools.edit_file("sample.txt", "foo", "bar")
+            assert not r2.success, "non-unique edit should fail"
+            assert "appears" in r2.error.lower() or "more" in r2.error.lower(), \
+                f"unexpected error: {r2.error}"
+
+            # Missing-string path.
+            r3 = Tools.edit_file("sample.txt", "nothing-here", "x")
+            assert not r3.success
+            assert "not found" in r3.error.lower()
+        finally:
+            os.chdir(old_cwd)
+    print("\n✅ edit_file: unique-match works, non-unique and missing both rejected")
+
+
+def test_run_python():
+    """Test: run_python executes inline code and a script file."""
+    print("\n" + "="*60)
+    print("TEST 10: run_python")
+    print("="*60)
+    # Inline code path.
+    r = Tools.run_python(code="print(2 + 2)")
+    assert r.success, f"inline run failed: {r.error}"
+    assert "4" in r.output, f"expected '4' in output, got {r.output!r}"
+
+    # Script path.
+    with tempfile.TemporaryDirectory() as td:
+        old_cwd = os.getcwd()
+        os.chdir(td)
+        try:
+            with open("hello.py", "w") as f:
+                f.write("print('script ran')\n")
+            r2 = Tools.run_python(script_path="hello.py")
+            assert r2.success, f"script run failed: {r2.error}"
+            assert "script ran" in r2.output
+
+            # Non-zero exit captures stderr separator and exit code.
+            with open("boom.py", "w") as f:
+                f.write("raise SystemExit(2)\n")
+            r3 = Tools.run_python(script_path="boom.py")
+            assert not r3.success
+            assert "code 2" in (r3.error or "")
+        finally:
+            os.chdir(old_cwd)
+
+    # Both/neither validation paths.
+    r4 = Tools.run_python()
+    assert not r4.success and "Provide" in r4.error
+    r5 = Tools.run_python(code="x", script_path="y.py")
+    assert not r5.success and "only one" in r5.error
+    print("\n✅ run_python: inline + script + non-zero + arg validation all pass")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "="*60)
     print("AUTONOMOUS AGENT TEST SUITE")
     print("="*60)
-    print("\nNote: These tests require a valid OpenAI API configuration.")
-    print("Make sure config/.env is set up with your API credentials.")
-    print("Tests 1-3 disable planning to avoid interactive prompts.\n")
+    print("\nNote: API tests require a valid OpenAI configuration in config/.env.")
+    print("Tool unit tests (8-10) run offline.\n")
 
-    input("Press Enter to run tests...")
+    # Offline tool unit tests first — fast, no API.
+    test_search_in_files()
+    test_edit_file()
+    test_run_python()
+
+    input("\nPress Enter to run API-backed tests (or Ctrl+C to stop here)...")
 
     # Legacy execution tests — disable planning so they don't prompt for input.
     os.environ["AGENT_PLANNING_ENABLED"] = "false"

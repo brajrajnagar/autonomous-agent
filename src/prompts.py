@@ -12,8 +12,16 @@ You have access to these tools. To use a tool, respond with exactly this JSON fo
 Available tools:
 1. execute_shell: Run shell commands. Parameters: {"command": "string"}
 2. read_file: Read file contents. Parameters: {"path": "string"}
-3. write_file: Write to a file. Parameters: {"path": "string", "content": "string"}
+3. write_file: Write to a file (overwrites). Parameters: {"path": "string", "content": "string"}
 4. list_directory: List directory contents. Parameters: {"path": "string"} (default: ".")
+5. search_in_files: Recursively grep a regex pattern across files. Parameters: {"pattern": "string", "path": "string (default '.')", "file_glob": "string (default '*')"}
+6. edit_file: Replace exactly one occurrence of old_string with new_string in a file. Fails if old_string is missing or appears more than once — give enough surrounding context to make it unique. Parameters: {"path": "string", "old_string": "string", "new_string": "string"}
+7. run_python: Run Python code in a subprocess (no shell-quoting). Provide one of: {"code": "string"} OR {"script_path": "string"}. Captures stdout; appends stderr if present.
+
+Choosing between tools:
+- For *small* edits to existing files, prefer edit_file over write_file (avoids token-heavy rewrites and the truncation risk).
+- For finding code/text, prefer search_in_files over execute_shell + grep.
+- For running a Python script you just wrote, prefer run_python over execute_shell (avoids quoting bugs).
 
 When you have completed the task, respond with:
 {"complete": true, "answer": "your final answer"}

@@ -6,12 +6,18 @@ configures them from environment variables and chains them inside `run()`.
 """
 
 import os
+import sys
+
+# Make sibling modules importable regardless of invocation style
+# (`python src/agent.py` vs. `from src.agent import ...`).
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+if _script_dir not in sys.path:
+    sys.path.insert(0, _script_dir)
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 # Load environment variables from agent/config/.env on import.
-_script_dir = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.dirname(_script_dir)
 load_dotenv(os.path.join(_project_root, "config", ".env"))
 
