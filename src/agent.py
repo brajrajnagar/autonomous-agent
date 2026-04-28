@@ -763,58 +763,147 @@ def main():
     """
     Main entry point for command-line usage.
     
-    Usage:
-        # Run with task as argument
-        python src/agent.py "List all files in the current directory"
-        
-        # Run interactively
-        python src/agent.py
-        > Enter your task: Count lines in README.md
-        > (Agent executes and shows result)
-        > Enter your task: quit
+    Supports two modes:
     
-    Example:
+    1. **Single-task mode**: Run one task and exit
+       ```bash
+       python src/agent.py "List all files"
+       ```
+    
+    2. **Interactive mode**: Chat with the agent, maintaining conversation context
+       ```bash
+       python src/agent.py --interactive
+       # or just: python src/agent.py
+       ```
+    
+    Interactive Mode Features:
+    - Multi-turn conversations
+    - Context memory across turns
+    - Follow-up questions
+    - Session-based history
+    
+    Example Interactive Session:
         ```bash
-        # Command line usage
-        $ python src/agent.py "Create hello.txt with 'Hello World'"
+        $ python src/agent.py
         
-        🤖 Starting agent for task: Create hello.txt with 'Hello World'
-        Max iterations: 10
+        🤖 Autonomous Agent - Interactive Mode
+        Type your task, or use commands:
+          - 'history' - Show conversation history
+          - 'clear' - Clear history and start fresh
+          - 'quit' or 'exit' - Exit the agent
         
-        --- Iteration 1 ---
-        THINKING...
-        ACT: Executing tool 'write_file'...
-        OBSERVE: Successfully wrote 11 characters to hello.txt
-        ✅ Task marked as complete
+        > You: List files in current directory
+        🤖 [Agent executes and shows result]
         
-        --- CRITIC REVIEW ---
-        Critic: APPROVED
-        ✅ Output approved by critic
+        > You: Now create a file called test.txt with "Hello"
+        🤖 [Agent remembers context and creates the file]
         
-        ==================================================
-        FINAL RESULT:
-        ==================================================
-        File created successfully
+        > You: What was in that file?
+        🤖 [Agent knows about test.txt from previous turn]
         ```
     """
     import sys
     
-    agent = AutonomousAgent()
+    # Check for interactive mode flag
+    interactive_mode = "--interactive" in sys.argv or len(sys.argv) == 1
     
-    if len(sys.argv) > 1:
-        task = " ".join(sys.argv[1:])
+    if interactive_mode:
+        # Interactive mode with conversation history
+        print("\n" + "="*60)
+        print("🤖  Autonomous Agent - Interactive Mode")
+        print("="*60)
+        print("""
+Type your task, or use commands:
+  - 'history'  - Show conversation history
+  - 'clear'    - Clear history and start fresh
+  - 'quit' or 'exit' or Ctrl+D - Exit the agent
+
+The agent remembers context across multiple turns!
+""")
+        
+        agent = AutonomousAgent()
+        conversation_history = []
+        
+        while True:
+            try:
+                # Get user input
+                user_input = input("\n\033[92m> You:\033[0m ").strip()
+                
+                if not user_input:
+                    continue
+                
+                # Handle commands
+                if user_input.lower() in ('quit', 'exit'):
+                    print("\n👋 Goodbye!")
+                    break
+                
+                if user_input.lower() == 'history':
+                    print("\n--- Conversation History ---")
+                    for i, (task, result) in enumerate(conversation_history, 1):
+                        print(f"\n{i}. Task: {task[:50]}...")
+                        print(f"   Result: {result[:100]}...")
+                    if not conversation_history:
+                        print("(No history yet)")
+                    continue
+                
+                if user_input.lower() == 'clear':
+                    conversation_history = []
+                    print("\n🗑️  History cleared. Starting fresh!")
+                    continue
+                
+                # Build context-aware task
+                if conversation_history:
+                    # Include recent context for follow-up understanding
+                    recent_context = "\n".join([
+                        f"Previous task {i}: {task}"
+                        for i, (task, _) in enumerate(conversation_history[-3:], 1)
+                    ])
+                    context_task = f"""You are in an ongoing conversation. Here is recent context:
+
+{recent_context}
+
+Current request from user: {user_input}
+
+If the current request refers to previous items (like "that file", "the content", etc.),
+use the context above to understand what is being referenced."""
+                else:
+                    context_task = user_input
+                
+                # Run the agent
+                result = agent.run(context_task)
+                
+                # Show result
+                print("\n" + "="*50)
+                print("🤖 Result:")
+                print("="*50)
+                print(result)
+                
+                # Store in history
+                conversation_history.append((user_input, result))
+                
+                # Keep history manageable (last 10 turns)
+                if len(conversation_history) > 10:
+                    conversation_history = conversation_history[-10:]
+                
+            except EOFError:
+                print("\n\n👋 Goodbye!")
+                break
+            except KeyboardInterrupt:
+                print("\n\n👋 Goodbye!")
+                break
     else:
-        print("Enter your task (or 'quit' to exit):")
-        task = input("> ")
-    
-    if task.lower() == "quit":
-        return
-    
-    result = agent.run(task)
-    print("\n" + "="*50)
-    print("FINAL RESULT:")
-    print("="*50)
-    print(result)
+        # Single-task mode
+        task = " ".join(sys.argv[1:])
+        
+        if task.lower() in ('quit', 'exit'):
+            return
+        
+        agent = AutonomousAgent()
+        result = agent.run(task)
+        print("\n" + "="*50)
+        print("FINAL RESULT:")
+        print("="*50)
+        print(result)
 
 
 if __name__ == "__main__":
