@@ -398,6 +398,7 @@ When you have completed the task, respond with:
         self.max_iterations = int(os.getenv("MAX_ITERATIONS", "10"))
         self.state = AgentState()
         self.tools = Tools()
+        self._last_action_hash = None  # For loop detection
     
     def _build_prompt(self) -> str:
         """
@@ -501,9 +502,28 @@ REPEAT: Continue until the task is complete.
         
         response = response.strip()
         
-        # Try to extract JSON
+        # Try multiple strategies to extract JSON
+        
+        # Strategy 1: Look for complete JSON objects
         try:
-            # Find JSON in response
+            # Find all potential JSON objects
+            brace_count = 0
+            start = -1
+            for i, char in enumerate(response):
+                if char == '{':
+                    if brace_count == 0:
+                        start = i
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0 and start != -1:
+                        json_str = response[start:i+1]
+                        return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+        
+        # Strategy 2: Simple find first { and last }
+        try:
             start = response.find("{")
             end = response.rfind("}") + 1
             if start != -1 and end > start:
@@ -511,6 +531,21 @@ REPEAT: Continue until the task is complete.
                 return json.loads(json_str)
         except json.JSONDecodeError:
             pass
+        
+        # Strategy 3: Try to find JSON after common prefixes
+        prefixes = ["Here's the result:", "Sure!", "OK", "Certainly", "Response:"]
+        for prefix in prefixes:
+            idx = response.find(prefix)
+            if idx != -1:
+                try:
+                    remaining = response[idx:]
+                    start = remaining.find("{")
+                    end = remaining.rfind("}") + 1
+                    if start != -1 and end > start:
+                        json_str = remaining[start:end]
+                        return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
         
         # If no valid JSON, treat as thought
         return {"thought": response}
@@ -634,6 +669,21 @@ Respond with either:
             return "APPROVED (no feedback generated)"
         return content.strip()
     
+    def _hash_action(self, tool_name: str, parameters: Dict[str, Any]) -> str:
+        """
+        Create a hash of an action for loop detection.
+        
+        Args:
+            tool_name: Name of the tool
+            parameters: Tool parameters
+        
+        Returns:
+            Hash string representing this action
+        """
+        import hashlib
+        action_str = f"{tool_name}:{str(sorted(parameters.items()))}"
+        return hashlib.md5(action_str.encode()).hexdigest()
+    
     def run(self, task: str) -> str:
         """
         Run the agent loop to complete a task.
@@ -676,6 +726,8 @@ Respond with either:
             Always includes: Critic feedback appended
         """
         self.state = AgentState(task=task)
+        self._last_action_hash = None
+        repeat_count = 0
         
         print(f"\n🤖 Starting agent for task: {task}")
         print(f"Max iterations: {self.max_iterations}\n")
@@ -725,6 +777,25 @@ Respond with either:
             if "tool" in parsed and "parameters" in parsed:
                 tool_name = parsed["tool"]
                 parameters = parsed["parameters"]
+                
+                # Loop detection
+                current_hash = self._hash_action(tool_name, parameters)
+                if current_hash == self._last_action_hash:
+                    repeat_count += 1
+                    print(f"⚠️  Detected repeated action (count: {repeat_count})")
+                    
+                    if repeat_count >= 3:
+                        print("🔄 Breaking loop - forcing progress...")
+                        # Force the agent to move on by adding a nudge to the prompt
+                        self.state.observation_history.append(
+                            f"NOTE: You've repeated the action '{tool_name}' multiple times. "
+                            "Please try a different approach or mark the task as complete."
+                        )
+                        repeat_count = 0
+                        continue
+                else:
+                    repeat_count = 0
+                    self._last_action_hash = current_hash
                 
                 # ACT
                 print(f"ACT: Executing tool '{tool_name}'...")
