@@ -22,6 +22,9 @@ __pycache__/
 test_output.txt
 *.log
 
+# Session logs (per-run JSONL events + Markdown reports)
+logs/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -70,7 +70,7 @@ def test_initial_plan_decomposes_task():
     print("="*60)
 
     agent = AutonomousAgent()
-    plan = agent._initial_plan("build a small NN from scratch with backprop")
+    plan = agent.planner.initial_plan("build a small NN from scratch with backprop")
     print(f"\nPlan summary: {plan.get('summary', '')}")
     for step in plan.get("steps", []):
         print(f"  {step['id']}. {step['description']}")
@@ -97,7 +97,7 @@ def test_plan_critique_returns_suggestions():
             {"id": 1, "description": "Write model code", "success_criterion": "File exists"}
         ],
     }
-    suggestions = agent._critique_plan("build a small NN from scratch with backprop", skeletal_plan)
+    suggestions = agent.planner.critique_plan("build a small NN from scratch with backprop", skeletal_plan)
     print(f"\nSuggestions returned: {len(suggestions)}")
     for s in suggestions:
         print(f"  - {s.get('issue', '')} → {s.get('fix', '')}")
@@ -122,7 +122,7 @@ def test_plan_refinement_applies_user_feedback():
             {"id": 3, "description": "Train the model", "success_criterion": "Training runs"},
         ],
     }
-    refined = agent._refine_plan(
+    refined = agent.planner.refine_plan(
         "build a small NN from scratch with backprop",
         base_plan,
         "also add a step to write a README with run instructions",
