@@ -749,17 +749,33 @@ Respond with either:
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
-                max_tokens=1000
+                max_tokens=8000
             )
-            
+
             llm_response = response.choices[0].message.content
             if llm_response is None:
                 llm_response = "I need to think more about this task."
             llm_response = llm_response.strip()
             print(f"LLM Response: {llm_response[:200]}...")
-            
+
             # Parse response
             parsed = self._parse_response(llm_response)
+
+            # Detect truncated tool-call JSON: response looks like a tool call
+            # but parser couldn't extract it (likely cut off by max_tokens).
+            looks_like_tool_call = '"tool"' in llm_response and '"parameters"' in llm_response
+            parser_only_got_thought = set(parsed.keys()) == {"thought"}
+            if looks_like_tool_call and parser_only_got_thought:
+                print("⚠️  Tool-call JSON appears truncated; nudging LLM to retry differently.")
+                self.state.thought_history.append(llm_response[:200])
+                self.state.action_history.append({"parse_error": True})
+                self.state.observation_history.append(
+                    "ERROR: Your previous response was truncated mid-JSON, likely because "
+                    "the 'content' field was too large. For big files, use execute_shell "
+                    "with a heredoc (e.g. cat > path << 'EOF' ... EOF), or split the write "
+                    "into multiple smaller write_file calls."
+                )
+                continue
             
             # Check for completion
             if parsed.get("complete"):
