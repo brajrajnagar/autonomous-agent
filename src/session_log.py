@@ -245,6 +245,17 @@ class SessionLogger:
         if len(repeated) >= 3:
             out.append(f"{len(repeated)} repeated-action events — the agent got "
                        f"stuck retrying; inspect the offending tool call.")
+
+        # Verification failures: a strong signal the agent wrote broken code.
+        verifications = self._collect("verification")
+        failures = [v for v in verifications
+                    if not v.data.get("passed") and not v.data.get("skipped")]
+        if failures:
+            from collections import Counter
+            by_verifier = Counter(v.data.get("verifier", "?") for v in failures)
+            breakdown = ", ".join(f"{n}× {name}" for name, n in by_verifier.most_common())
+            out.append(f"{len(failures)} post-tool verification failures ({breakdown}) — "
+                       f"agent shipped broken code that automatic checks caught.")
         return out
 
 

@@ -19,13 +19,15 @@ class Executor:
 
     def __init__(self, client, model: str, tools: Tools,
                  max_iterations: int, max_tokens_tao: int,
-                 logger: Optional[Any] = None):
+                 logger: Optional[Any] = None,
+                 feedback: Optional[Any] = None):
         self.client = client
         self.model = model
         self.tools = tools
         self.max_iterations = max_iterations
         self.max_tokens_tao = max_tokens_tao
         self.logger = logger
+        self.feedback = feedback
 
     # ---- Entry points --------------------------------------------------------
 
@@ -177,6 +179,14 @@ class Executor:
                 state.action_history.append({"tool": tool_name, "params": parameters})
                 result = self._execute_tool(tool_name, parameters)
                 observation = result.output if result.success else f"ERROR: {result.error}"
+
+                # Post-tool verification: append deterministic checks to the
+                # observation so the agent reacts on the next iteration.
+                if self.feedback:
+                    extra = self.feedback.run_after(tool_name, parameters, result)
+                    if extra:
+                        observation = f"{observation}\n{extra}" if observation else extra
+
                 state.observation_history.append(observation)
                 print(f"{C.label('OBSERVE:')} {C.dim(observation[:200])}...")
                 if self.logger:

@@ -24,6 +24,7 @@ load_dotenv(os.path.join(_project_root, "config", ".env"))
 from colors import C
 from critic import Critic
 from executor import Executor
+from feedback import make_feedback_engine
 from planner import Planner
 from session_log import make_logger
 from state import AgentState
@@ -59,6 +60,9 @@ class AutonomousAgent:
         log_dir = os.getenv("AGENT_LOG_DIR", os.path.join(_project_root, "logs"))
         self.logger = make_logger(logging_enabled, log_dir)
 
+        # Feedback engine: post-tool deterministic verifiers (None when disabled).
+        self.feedback = make_feedback_engine(logger=self.logger)
+
         self.tools = Tools()
         self.planner = Planner(
             client=self.client, model=self.model,
@@ -71,7 +75,7 @@ class AutonomousAgent:
         self.executor = Executor(
             client=self.client, model=self.model, tools=self.tools,
             max_iterations=self.max_iterations, max_tokens_tao=max_tokens_tao,
-            logger=self.logger,
+            logger=self.logger, feedback=self.feedback,
         )
         self.critic = Critic(
             client=self.client, model=self.model, max_tokens=max_tokens_critic,

@@ -13,6 +13,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.agent import AutonomousAgent
 from src.tools import Tools
+from src.feedback import (
+    FeedbackEngine, PythonSyntaxVerifier, JsonSyntaxVerifier,
+    make_feedback_engine,
+)
 
 
 def test_list_directory():
@@ -257,6 +261,103 @@ def test_run_python():
     print("\n✅ run_python: inline + script + non-zero + arg validation all pass")
 
 
+def test_feedback_python_syntax_pass_silent():
+    """Test: PythonSyntaxVerifier passes silently on valid Python (no observation noise)."""
+    print("\n" + "="*60)
+    print("TEST 11: feedback — Python syntax pass is silent")
+    print("="*60)
+    with tempfile.TemporaryDirectory() as td:
+        old_cwd = os.getcwd()
+        os.chdir(td)
+        try:
+            with open("ok.py", "w") as f:
+                f.write("def foo():\n    return 42\n")
+            engine = FeedbackEngine([PythonSyntaxVerifier()])
+            extra = engine.run_after("write_file", {"path": "ok.py"}, None)
+            assert extra == "", f"expected silent pass, got: {extra!r}"
+        finally:
+            os.chdir(old_cwd)
+    print("\n✅ Valid Python produces no observation noise on pass")
+
+
+def test_feedback_python_syntax_fail():
+    """Test: PythonSyntaxVerifier surfaces syntax errors with line info."""
+    print("\n" + "="*60)
+    print("TEST 12: feedback — Python syntax error caught")
+    print("="*60)
+    with tempfile.TemporaryDirectory() as td:
+        old_cwd = os.getcwd()
+        os.chdir(td)
+        try:
+            with open("broken.py", "w") as f:
+                f.write("def foo(:\n    return 42\n")  # invalid syntax
+            engine = FeedbackEngine([PythonSyntaxVerifier()])
+            extra = engine.run_after("write_file", {"path": "broken.py"}, None)
+            print("\n", extra)
+            assert extra, "expected non-empty feedback for broken file"
+            assert "[verify] py_syntax:" in extra
+            assert "broken.py" in extra
+        finally:
+            os.chdir(old_cwd)
+    print("\n✅ Broken Python produces an actionable [verify] line")
+
+
+def test_feedback_json_syntax_fail():
+    """Test: JsonSyntaxVerifier catches malformed JSON."""
+    print("\n" + "="*60)
+    print("TEST 13: feedback — JSON syntax error caught")
+    print("="*60)
+    with tempfile.TemporaryDirectory() as td:
+        old_cwd = os.getcwd()
+        os.chdir(td)
+        try:
+            with open("bad.json", "w") as f:
+                f.write('{"key": "missing close')
+            engine = FeedbackEngine([JsonSyntaxVerifier()])
+            extra = engine.run_after("write_file", {"path": "bad.json"}, None)
+            assert "[verify] json_syntax:" in extra, f"got: {extra!r}"
+            assert "bad.json" in extra
+        finally:
+            os.chdir(old_cwd)
+    print("\n✅ Broken JSON produces an actionable [verify] line")
+
+
+def test_feedback_disabled_returns_none():
+    """Test: AGENT_FEEDBACK_ENABLED=false skips the engine entirely."""
+    print("\n" + "="*60)
+    print("TEST 14: feedback — disabled via env var")
+    print("="*60)
+    os.environ["AGENT_FEEDBACK_ENABLED"] = "false"
+    try:
+        engine = make_feedback_engine()
+        assert engine is None, f"expected None, got {engine}"
+    finally:
+        os.environ.pop("AGENT_FEEDBACK_ENABLED", None)
+    print("\n✅ Disabled feedback returns None")
+
+
+def test_feedback_skipped_for_non_matching_tool():
+    """Test: Verifiers whose applies_to() returns False produce no output."""
+    print("\n" + "="*60)
+    print("TEST 15: feedback — verifier skipped for unrelated tool calls")
+    print("="*60)
+    engine = FeedbackEngine([PythonSyntaxVerifier(), JsonSyntaxVerifier()])
+    # list_directory and execute_shell don't match any verifier.
+    assert engine.run_after("list_directory", {"path": "."}, None) == ""
+    assert engine.run_after("execute_shell", {"command": "ls"}, None) == ""
+    # A .txt write has no verifier applicable.
+    with tempfile.TemporaryDirectory() as td:
+        old_cwd = os.getcwd()
+        os.chdir(td)
+        try:
+            with open("notes.txt", "w") as f:
+                f.write("hello")
+            assert engine.run_after("write_file", {"path": "notes.txt"}, None) == ""
+        finally:
+            os.chdir(old_cwd)
+    print("\n✅ Engine produces no output for non-matching tool/file combinations")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "="*60)
@@ -269,6 +370,13 @@ def run_all_tests():
     test_search_in_files()
     test_edit_file()
     test_run_python()
+
+    # Offline feedback-engine tests — also fast, no API.
+    test_feedback_python_syntax_pass_silent()
+    test_feedback_python_syntax_fail()
+    test_feedback_json_syntax_fail()
+    test_feedback_disabled_returns_none()
+    test_feedback_skipped_for_non_matching_tool()
 
     input("\nPress Enter to run API-backed tests (or Ctrl+C to stop here)...")
 
