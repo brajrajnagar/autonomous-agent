@@ -1,25 +1,32 @@
 # Autonomous Agent
 
-A highly autonomous AI-powered task automation agent with Think → Act → Observe loop architecture.
+An AI-powered task automation agent that **plans before it acts**: it decomposes the user's request into a step-by-step plan, lets the user critique and refine that plan, then executes each step with a Think → Act → Observe loop.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│           Single Agent Loop             │
-│                                         │
-│  ┌─────────┐    ┌─────────┐    ┌──────┐│
-│  │  THINK  │ →  │  ACT    │ →  │OBSERVE││
-│  │(Plan)   │    │(Execute)│    │(Result)│
-│  └─────────┘    └─────────┘    └──────┘│
-│       ↑                                  │
-│       └──────────────────────────────────┘
-│              (Repeat until done)         │
-│                                         │
-│  ┌─────────────────────────────────┐   │
-│  │   CRITIC (Second Pass Review)   │   │
-│  └─────────────────────────────────┘   │
-└─────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                       AutonomousAgent                        │
+│                                                              │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │   1. PLAN          (initial plan from request)      │   │
+│   │   2. CRITIQUE      (reviewer surfaces gaps)         │   │
+│   │   3. REFINE        (user iterates until satisfied)  │   │
+│   └─────────────────────────────────────────────────────┘   │
+│                          │                                   │
+│                          ▼                                   │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │   For each plan step:                               │   │
+│   │   ┌───────┐   ┌───────┐   ┌─────────┐               │   │
+│   │   │ THINK │ → │  ACT  │ → │ OBSERVE │ → repeat      │   │
+│   │   └───────┘   └───────┘   └─────────┘               │   │
+│   └─────────────────────────────────────────────────────┘   │
+│                          │                                   │
+│                          ▼                                   │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │   CRITIC (final post-execution quality review)      │   │
+│   └─────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Setup
@@ -28,7 +35,7 @@ A highly autonomous AI-powered task automation agent with Think → Act → Obse
 
 ```bash
 python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
 ```
 
 ### 2. Install Dependencies
@@ -38,8 +45,6 @@ pip install openai python-dotenv
 ```
 
 ### 3. Configure API
-
-Copy the example config and fill in your values:
 
 ```bash
 cp config/.env.example config/.env
@@ -53,6 +58,17 @@ OPENAI_API_KEY=your-api-key-here
 OPENAI_MODEL=gpt-4
 MAX_ITERATIONS=10
 DEBUG=true
+
+# Planning loop
+AGENT_PLANNING_ENABLED=true
+AGENT_MAX_PLAN_REFINEMENTS=5
+
+# Per-loop max_tokens (tune to control truncation vs. cost)
+AGENT_MAX_TOKENS_TAO=15000
+AGENT_MAX_TOKENS_CRITIC=5000
+AGENT_MAX_TOKENS_PLAN_INITIAL=10000
+AGENT_MAX_TOKENS_PLAN_CRITIQUE=15000
+AGENT_MAX_TOKENS_PLAN_REFINE=15000
 ```
 
 ## Usage
@@ -60,10 +76,10 @@ DEBUG=true
 ### Command Line
 
 ```bash
-# Run with a task as argument
-python src/agent.py "List all files in the current directory"
+# Single-task mode
+python src/agent.py "build a small neural network from scratch"
 
-# Run interactively
+# Interactive mode (recommended)
 python src/agent.py
 ```
 
@@ -77,23 +93,59 @@ result = agent.run("Create a file called test.txt with 'Hello World' content")
 print(result)
 ```
 
+## Planning Loop
+
+When you submit a task, the agent first proposes a plan and shows it to you with the reviewer's suggested improvements:
+
+```
+═══════════════════════════════════════════════════════
+📋 PROPOSED PLAN
+═══════════════════════════════════════════════════════
+Summary: Build a small NN from scratch with backprop, train, document.
+
+Steps:
+  1. Create project directory
+  2. Write neural_network.py with NN class, forward pass, backprop
+  3. Load real dataset (e.g., Iris)
+  4. Train and report test accuracy
+  5. Write README.md with run instructions
+
+💡 Suggested improvements:
+  [1] Step 3 doesn't specify which dataset
+      → Pick a concrete dataset (Iris, MNIST, etc.)
+  [2] No test/eval split mentioned
+      → Add a step to evaluate on held-out test data
+
+Type 'go' / 'ok' / Enter to approve and execute,
+     'apply 1' or 'apply 1,2' to adopt suggestions,
+     or describe changes in your own words.
+> _
+```
+
+You can:
+
+- Type `go` / `ok` / Enter — approve and execute the current plan.
+- Type `apply 1` or `apply 1,3` — adopt one or more critic suggestions.
+- Describe changes freely — e.g. *"merge steps 2 and 3, and use MNIST instead"*.
+
+The plan re-renders after each refinement until you approve. After approval, each step runs through the Think → Act → Observe loop with its `success_criterion` injected as guidance.
+
+To skip planning for trivial one-shot tasks, set `AGENT_PLANNING_ENABLED=false`.
+
 ## Available Tools
 
 1. **execute_shell**: Run shell commands
    ```json
    {"tool": "execute_shell", "parameters": {"command": "ls -la"}}
    ```
-
 2. **read_file**: Read file contents
    ```json
    {"tool": "read_file", "parameters": {"path": "README.md"}}
    ```
-
 3. **write_file**: Write to a file
    ```json
    {"tool": "write_file", "parameters": {"path": "output.txt", "content": "Hello"}}
    ```
-
 4. **list_directory**: List directory contents
    ```json
    {"tool": "list_directory", "parameters": {"path": "."}}
@@ -101,32 +153,44 @@ print(result)
 
 ## How It Works
 
-1. **THINK**: The agent considers what needs to be done next based on the task and previous observations
-2. **ACT**: The agent executes a tool (shell command, file operation, etc.)
-3. **OBSERVE**: The agent observes the result of its action
-4. **REPEAT**: Steps 1-3 continue until the task is complete
-5. **CRITIC**: A second LLM pass reviews the output for quality and accuracy
+1. **PLAN**: Decompose the user's request into ordered steps with success criteria.
+2. **CRITIQUE**: A reviewer LLM surfaces gaps, ambiguity, and missing implicit work.
+3. **REFINE**: User iterates on the plan (apply suggestions, free-form edits) until satisfied.
+4. **EXECUTE**: For each step, run Think → Act → Observe until the step's success criterion is met.
+5. **CRITIC**: Final LLM pass reviews the overall result for quality and accuracy.
 
 ## Example Session
 
 ```
-🤖 Starting agent for task: Create a file called hello.txt with "Hello World" inside
-Max iterations: 10
+> You: build a small NN with backprop from scratch
 
---- Iteration 1 ---
-THINKING...
-LLM Response: {"tool": "write_file", "parameters": {"path": "hello.txt", "content": "Hello World"}}
-Thought: I need to create a file called hello.txt with "Hello World" content
-ACT: Executing tool 'write_file'...
-OBSERVE: Successfully wrote 11 characters to hello.txt
-✅ Task marked as complete
+🤖 Starting agent for task: build a small NN with backprop from scratch
+🧭 Generating initial plan...
+🔍 Critiquing plan (round 1)...
+
+[plan + suggestions shown — see "Planning Loop" section]
+
+> apply 1,2
+
+✏️  Refining plan based on feedback...
+🔍 Critiquing plan (round 2)...
+
+[refined plan shown]
+
+> go
+✅ Plan approved. Beginning execution.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+▶️  STEP 1/5: Create project directory
+   Success: Directory exists
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[T-A-O loop runs...]
+
+[steps 2-5 follow]
 
 --- CRITIC REVIEW ---
 Critic: APPROVED
 ✅ Output approved by critic
-
-FINAL RESULT:
-Task completed successfully
 ```
 
 ## Project Structure
@@ -134,25 +198,31 @@ Task completed successfully
 ```
 agent/
 ├── src/
-│   └── agent.py       # Main agent implementation
+│   ├── agent.py        # Agent implementation
+│   └── test_agent.py   # Test scripts
 ├── config/
-│   └── .env.example   # Configuration template
-├── tests/             # Test files (future)
-├── venv/              # Virtual environment
-├── progress.md        # Development progress tracker
-└── README.md          # This file
+│   ├── .env            # Local config (not committed)
+│   └── .env.example    # Configuration template
+├── tests/              # (reserved for future tests)
+├── venv/               # Virtual environment
+├── GUIDE.md            # Architecture & extension guide
+├── progress.md         # Development progress tracker
+└── README.md           # This file
 ```
 
 ## Roadmap
 
-See [progress.md](progress.md) for detailed roadmap including:
-- Phase 2: Memory System (vector DB, context retention)
-- Phase 3: Multi-Agent Orchestration
-- Phase 4: Advanced Tools (web, APIs)
-- Phase 5: Production Readiness (Docker sandbox, monitoring)
+See [progress.md](progress.md) for the detailed roadmap. Recent additions:
+
+- ✅ Phase 1: Single-agent Think → Act → Observe loop
+- ✅ Phase 1.5: **Plan → Critique → Refine → Execute orchestration** (new)
+- 🔮 Phase 2: Memory System (lessons across sessions, vector DB)
+- 🔮 Phase 3: Multi-Agent Orchestration
+- 🔮 Phase 4: Advanced Tools (web, APIs)
+- 🔮 Phase 5: Production Readiness (Docker sandbox, monitoring)
 
 ## Security Notes
 
-- Absolute paths are blocked for file operations
-- Shell commands run with the permissions of the current user
-- Consider using Docker sandboxing (Phase 5) for production use
+- Absolute paths are blocked for `read_file` / `write_file`.
+- Shell commands run with the permissions of the current user — review the proposed plan before approving.
+- Consider Docker sandboxing (Phase 5) for production use.
