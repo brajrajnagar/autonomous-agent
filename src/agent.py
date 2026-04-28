@@ -7,6 +7,18 @@ This module implements a single autonomous agent that:
 3. OBSERVE: Observes the results
 4. REPEAT: Continues until task is complete
 5. CRITIC: Reviews the output in a second pass
+
+Example Usage:
+    ```python
+    from agent import AutonomousAgent
+    
+    # Create an agent instance
+    agent = AutonomousAgent()
+    
+    # Run a task
+    result = agent.run("List all files in the current directory")
+    print(result)
+    ```
 """
 
 import os
@@ -27,7 +39,20 @@ load_dotenv(env_path)
 
 @dataclass
 class ToolResult:
-    """Result from executing a tool"""
+    """
+    Result from executing a tool.
+    
+    Attributes:
+        success (bool): Whether the tool execution succeeded
+        output (str): The output from the tool
+        error (Optional[str]): Error message if execution failed
+    
+    Example:
+        ```python
+        result = ToolResult(success=True, output="File contents here")
+        result = ToolResult(success=False, output="", error="File not found")
+        ```
+    """
     success: bool
     output: str
     error: Optional[str] = None
@@ -35,7 +60,29 @@ class ToolResult:
 
 @dataclass
 class AgentState:
-    """Maintains the agent's state during execution"""
+    """
+    Maintains the agent's state during execution.
+    
+    Tracks the complete history of the agent's thought process,
+    actions taken, and observations made during task execution.
+    
+    Attributes:
+        task (str): The current task description
+        thought_history (List[str]): History of thoughts/reasoning
+        action_history (List[Dict]): History of actions taken
+        observation_history (List[str]): History of observations
+        iteration_count (int): Current iteration number
+        is_complete (bool): Whether task is marked complete
+        final_answer (Optional[str]): The final answer if complete
+    
+    Example:
+        ```python
+        state = AgentState(task="List files in directory")
+        state.thought_history.append("I need to list the directory first")
+        state.action_history.append({"tool": "list_directory", "params": {"path": "."}})
+        state.observation_history.append("[FILE] test.txt")
+        ```
+    """
     task: str = ""
     thought_history: List[str] = field(default_factory=list)
     action_history: List[Dict[str, Any]] = field(default_factory=list)
@@ -46,11 +93,60 @@ class AgentState:
 
 
 class Tools:
-    """Available tools for the agent"""
+    """
+    Available tools for the agent.
+    
+    This class provides static methods that the agent can use to interact
+    with the environment. Each tool returns a ToolResult object.
+    
+    Example:
+        ```python
+        # List directory contents
+        result = Tools.list_directory(".")
+        
+        # Read a file
+        result = Tools.read_file("config.txt")
+        
+        # Write to a file
+        result = Tools.write_file("output.txt", "Hello World")
+        
+        # Execute shell command
+        result = Tools.execute_shell("ls -la")
+        ```
+    """
     
     @staticmethod
     def execute_shell(command: str, timeout: int = 60) -> ToolResult:
-        """Execute a shell command"""
+        """
+        Execute a shell command and capture its output.
+        
+        Args:
+            command (str): The shell command to execute
+            timeout (int): Maximum execution time in seconds (default: 60)
+        
+        Returns:
+            ToolResult: Contains success status, stdout, and any error
+        
+        Example:
+            ```python
+            # List files
+            result = Tools.execute_shell("ls -la")
+            if result.success:
+                print(result.output)  # Command output
+            else:
+                print(result.error)   # Error message
+            
+            # Get current directory
+            result = Tools.execute_shell("pwd")
+            
+            # Create a directory
+            result = Tools.execute_shell("mkdir new_folder")
+            ```
+        
+        Security Note:
+            Commands run with the permissions of the current user.
+            Be cautious with destructive commands like rm -rf.
+        """
         try:
             result = subprocess.run(
                 command,
@@ -80,7 +176,33 @@ class Tools:
     
     @staticmethod
     def read_file(path: str) -> ToolResult:
-        """Read contents of a file"""
+        """
+        Read the contents of a file.
+        
+        Args:
+            path (str): Relative path to the file (absolute paths blocked for security)
+        
+        Returns:
+            ToolResult: Contains file contents on success, error message on failure
+        
+        Example:
+            ```python
+            # Read a config file
+            result = Tools.read_file("config/settings.json")
+            if result.success:
+                content = result.output
+                print(content)
+            else:
+                print(f"Error: {result.error}")
+            
+            # Read source code
+            result = Tools.read_file("src/main.py")
+            ```
+        
+        Security Note:
+            Absolute paths (starting with /) are blocked to prevent
+            reading files outside the project directory.
+        """
         try:
             # Security: prevent absolute paths outside project
             if path.startswith("/"):
@@ -103,7 +225,34 @@ class Tools:
     
     @staticmethod
     def write_file(path: str, content: str) -> ToolResult:
-        """Write content to a file"""
+        """
+        Write content to a file (creates new file or overwrites existing).
+        
+        Args:
+            path (str): Relative path to the file
+            content (str): Content to write to the file
+        
+        Returns:
+            ToolResult: Success message with character count, or error
+        
+        Example:
+            ```python
+            # Create a new file
+            result = Tools.write_file("output.txt", "Hello World!")
+            
+            # Write JSON config
+            import json
+            config = {"name": "test", "value": 42}
+            result = Tools.write_file("config.json", json.dumps(config))
+            
+            # Write multi-line content
+            content = "Line 1\\nLine 2\\nLine 3"
+            result = Tools.write_file("multiline.txt", content)
+            ```
+        
+        Security Note:
+            Absolute paths are blocked. File will be created if it doesn't exist.
+        """
         try:
             # Security: prevent absolute paths outside project
             if path.startswith("/"):
@@ -123,7 +272,36 @@ class Tools:
     
     @staticmethod
     def list_directory(path: str = ".") -> ToolResult:
-        """List contents of a directory"""
+        """
+        List all files and directories in a given path.
+        
+        Args:
+            path (str): Directory path to list (default: current directory ".")
+        
+        Returns:
+            ToolResult: Formatted list with [DIR] and [FILE] prefixes
+        
+        Example:
+            ```python
+            # List current directory
+            result = Tools.list_directory()
+            print(result.output)
+            # Output:
+            # [DIR]  src
+            # [DIR]  config
+            # [FILE] README.md
+            
+            # List specific directory
+            result = Tools.list_directory("src")
+            
+            # List parent directory
+            result = Tools.list_directory("..")
+            ```
+        
+        Output Format:
+            Each item is prefixed with [DIR] for directories or [FILE] for files,
+            sorted alphabetically.
+        """
         try:
             if not os.path.exists(path):
                 return ToolResult(
@@ -152,7 +330,26 @@ class Tools:
 
 class AutonomousAgent:
     """
-    Autonomous agent with Think → Act → Observe loop
+    Autonomous agent with Think → Act → Observe loop.
+    
+    The agent operates in a continuous loop:
+    1. THINK: Analyze the task and current state, decide next action
+    2. ACT: Execute a tool to perform the action
+    3. OBSERVE: Process the result of the action
+    4. REPEAT: Continue until task is complete
+    5. CRITIC: Review the final output for quality
+    
+    Example:
+        ```python
+        # Create agent instance
+        agent = AutonomousAgent()
+        
+        # Run a simple task
+        result = agent.run("What files are in the current directory?")
+        
+        # Run a complex multi-step task
+        result = agent.run("Create a file called report.txt with a summary of all .py files")
+        ```
     """
     
     TOOLS_PROMPT = """
@@ -170,6 +367,29 @@ When you have completed the task, respond with:
 """
     
     def __init__(self):
+        """
+        Initialize the AutonomousAgent.
+        
+        Sets up the OpenAI-compatible API client and loads configuration
+        from environment variables.
+        
+        Environment Variables Required:
+            OPENAI_API_BASE: API endpoint URL (e.g., https://api.openai.com/v1)
+            OPENAI_API_KEY: API authentication key
+            OPENAI_MODEL: Model to use (default: "gpt-4")
+            MAX_ITERATIONS: Maximum loop iterations (default: 10)
+        
+        Example:
+            ```python
+            # With environment variables set:
+            # OPENAI_API_BASE=https://api.openai.com/v1
+            # OPENAI_API_KEY=sk-xxx
+            # OPENAI_MODEL=gpt-4
+            
+            agent = AutonomousAgent()
+            # Agent is ready to use
+            ```
+        """
         self.client = OpenAI(
             base_url=os.getenv("OPENAI_API_BASE"),
             api_key=os.getenv("OPENAI_API_KEY")
@@ -180,7 +400,36 @@ When you have completed the task, respond with:
         self.tools = Tools()
     
     def _build_prompt(self) -> str:
-        """Build the current prompt with full context"""
+        """
+        Build the current prompt with full context for the LLM.
+        
+        Constructs a prompt that includes:
+        - The original task
+        - Complete history of thoughts, actions, and observations
+        - Instructions for the current iteration
+        
+        Returns:
+            str: The complete prompt to send to the LLM
+        
+        Example:
+            ```python
+            # After some iterations, the prompt will include:
+            # Task: List files in directory
+            # 
+            # --- History ---
+            # Iteration 1:
+            # Thought: I need to list the directory
+            # Action: {"tool": "list_directory", "params": {"path": "."}}
+            # Observation: [FILE] test.txt
+            #
+            # --- Current Turn ---
+            # Iteration 2:
+            # What do you think needs to be done next?
+            ```
+        
+        Note:
+            This method is called internally during each iteration of run().
+        """
         prompt = f"""Task: {self.state.task}
 
 You are an autonomous agent. Complete the task using a Think → Act → Observe loop.
@@ -213,7 +462,41 @@ REPEAT: Continue until the task is complete.
         return prompt
     
     def _parse_response(self, response: str) -> Dict[str, Any]:
-        """Parse the LLM response to extract tool usage or completion"""
+        """
+        Parse the LLM response to extract tool usage or completion status.
+        
+        Attempts to find and parse JSON in the response. If no valid JSON
+        is found, treats the response as a thought.
+        
+        Args:
+            response (str): Raw response text from the LLM
+        
+        Returns:
+            Dict[str, Any]: Parsed response, which may contain:
+                - "tool": Name of tool to use
+                - "parameters": Tool parameters
+                - "complete": True if task is complete
+                - "answer": Final answer if complete
+                - "thought": Reasoning text
+        
+        Example:
+            ```python
+            # Tool usage response
+            response = 'Sure! {"tool": "list_directory", "parameters": {"path": "."}}'
+            parsed = _parse_response(response)
+            # Result: {"tool": "list_directory", "parameters": {"path": "."}}
+            
+            # Completion response
+            response = '{"complete": true, "answer": "Found 5 files"}'
+            parsed = _parse_response(response)
+            # Result: {"complete": True, "answer": "Found 5 files"}
+            
+            # Thought-only response
+            response = "I think I should list the directory first"
+            parsed = _parse_response(response)
+            # Result: {"thought": "I think I should list the directory first"}
+            ```
+        """
         import json
         
         response = response.strip()
@@ -233,7 +516,37 @@ REPEAT: Continue until the task is complete.
         return {"thought": response}
     
     def _execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> ToolResult:
-        """Execute a tool with given parameters"""
+        """
+        Execute a tool with given parameters.
+        
+        Routes the request to the appropriate tool method based on tool name.
+        
+        Args:
+            tool_name (str): Name of the tool to execute
+            parameters (Dict[str, Any]): Parameters for the tool
+        
+        Returns:
+            ToolResult: Result of the tool execution
+        
+        Example:
+            ```python
+            # Execute shell command
+            result = _execute_tool("execute_shell", {"command": "ls -la"})
+            
+            # Read a file
+            result = _execute_tool("read_file", {"path": "config.txt"})
+            
+            # Write to a file
+            result = _execute_tool("write_file", {"path": "out.txt", "content": "Hello"})
+            
+            # List directory
+            result = _execute_tool("list_directory", {"path": "."})
+            
+            # Unknown tool
+            result = _execute_tool("unknown_tool", {})
+            # Returns: ToolResult(success=False, error="Unknown tool: unknown_tool")
+            ```
+        """
         if tool_name == "execute_shell":
             return self.tools.execute_shell(parameters.get("command", ""))
         elif tool_name == "read_file":
@@ -253,7 +566,37 @@ REPEAT: Continue until the task is complete.
             )
     
     def _critic_review(self, result: str) -> str:
-        """Second pass: Critic reviews the output"""
+        """
+        Second pass: Critic reviews the output for quality assurance.
+        
+        After the agent completes a task, this method sends the result
+        to the LLM for review, asking it to evaluate:
+        1. Is the task actually complete?
+        2. Are there any errors or issues?
+        3. Is the answer clear and accurate?
+        4. Any improvements needed?
+        
+        Args:
+            result (str): The agent's completed result
+        
+        Returns:
+            str: Critic feedback, typically "APPROVED" or suggestions
+        
+        Example:
+            ```python
+            # Good result
+            feedback = _critic_review("Found 3 Python files: main.py, utils.py, config.py")
+            # Returns: "APPROVED"
+            
+            # Incomplete result
+            feedback = _critic_review("There are some files...")
+            # Returns: "The answer is vague. Please provide specific file names."
+            ```
+        
+        Note:
+            Returns "APPROVED (no feedback generated)" if the API returns
+            empty content, allowing the agent to proceed.
+        """
         critic_prompt = f"""
 You are a critic/reviewer. Review the following task completion:
 
@@ -292,7 +635,46 @@ Respond with either:
         return content.strip()
     
     def run(self, task: str) -> str:
-        """Run the agent loop to complete a task"""
+        """
+        Run the agent loop to complete a task.
+        
+        Main execution method that runs the Think → Act → Observe loop
+        until the task is complete or max iterations is reached.
+        
+        Args:
+            task (str): Natural language description of the task to complete
+        
+        Returns:
+            str: The final result, including any critic feedback
+        
+        Example:
+            ```python
+            agent = AutonomousAgent()
+            
+            # Simple task
+            result = agent.run("List all files in the current directory")
+            print(result)
+            
+            # Multi-step task
+            result = agent.run("Create a file called summary.txt that contains a list of all .py files in the src directory")
+            print(result)
+            
+            # Complex task
+            result = agent.run("Read the README.md file, count the number of lines, and create a new file called stats.txt with the count")
+            ```
+        
+        Output:
+            The method prints progress information during execution:
+            - Iteration number
+            - LLM response (thought/tool selection)
+            - Tool execution result
+            - Critic review at the end
+        
+        Returns:
+            If successful: The final answer
+            If incomplete: Best attempt with last observations
+            Always includes: Critic feedback appended
+        """
         self.state = AgentState(task=task)
         
         print(f"\n🤖 Starting agent for task: {task}")
@@ -378,7 +760,43 @@ Respond with either:
 
 
 def main():
-    """Main entry point"""
+    """
+    Main entry point for command-line usage.
+    
+    Usage:
+        # Run with task as argument
+        python src/agent.py "List all files in the current directory"
+        
+        # Run interactively
+        python src/agent.py
+        > Enter your task: Count lines in README.md
+        > (Agent executes and shows result)
+        > Enter your task: quit
+    
+    Example:
+        ```bash
+        # Command line usage
+        $ python src/agent.py "Create hello.txt with 'Hello World'"
+        
+        🤖 Starting agent for task: Create hello.txt with 'Hello World'
+        Max iterations: 10
+        
+        --- Iteration 1 ---
+        THINKING...
+        ACT: Executing tool 'write_file'...
+        OBSERVE: Successfully wrote 11 characters to hello.txt
+        ✅ Task marked as complete
+        
+        --- CRITIC REVIEW ---
+        Critic: APPROVED
+        ✅ Output approved by critic
+        
+        ==================================================
+        FINAL RESULT:
+        ==================================================
+        File created successfully
+        ```
+    """
     import sys
     
     agent = AutonomousAgent()
