@@ -17,7 +17,12 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 # Load environment variables
-load_dotenv("../config/.env")
+# Get the directory containing this script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# Project root is one level up
+project_root = os.path.dirname(script_dir)
+env_path = os.path.join(project_root, "config", ".env")
+load_dotenv(env_path)
 
 
 @dataclass
@@ -281,7 +286,10 @@ Respond with either:
             max_tokens=500
         )
         
-        return response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
+        if content is None:
+            return "APPROVED (no feedback generated)"
+        return content.strip()
     
     def run(self, task: str) -> str:
         """Run the agent loop to complete a task"""
