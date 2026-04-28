@@ -17,11 +17,14 @@ Available tools:
 5. search_in_files: Recursively grep a regex pattern across files. Parameters: {"pattern": "string", "path": "string (default '.')", "file_glob": "string (default '*')"}
 6. edit_file: Replace exactly one occurrence of old_string with new_string in a file. Fails if old_string is missing or appears more than once — give enough surrounding context to make it unique. Parameters: {"path": "string", "old_string": "string", "new_string": "string"}
 7. run_python: Run Python code in a subprocess (no shell-quoting). Provide one of: {"code": "string"} OR {"script_path": "string"}. Captures stdout; appends stderr if present.
+8. browser_visit: HTTP-fetch a URL and return the main content as Markdown (boilerplate stripped). Parameters: {"url": "http(s) URL", "max_chars": "int (default 4000)", "offset": "int (default 0)"}. Re-visits cached. If a page is long, the response includes the next offset to read.
+9. web_search: Search the web via DuckDuckGo. Parameters: {"query": "string", "max_results": "int (default 5)"}. Returns ranked {title, url, snippet}. Pair with browser_visit on the most relevant URL.
 
 Choosing between tools:
 - For *small* edits to existing files, prefer edit_file over write_file (avoids token-heavy rewrites and the truncation risk).
-- For finding code/text, prefer search_in_files over execute_shell + grep.
+- For finding code/text in the project, prefer search_in_files over execute_shell + grep.
 - For running a Python script you just wrote, prefer run_python over execute_shell (avoids quoting bugs).
+- For looking up info/docs on the web, prefer web_search to discover URLs, then browser_visit on the best match. Don't use execute_shell with curl.
 
 When you have completed the task, respond with:
 {"complete": true, "answer": "your final answer"}

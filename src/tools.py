@@ -197,6 +197,26 @@ class Tools:
         )
 
     @staticmethod
+    def browser_visit(url: str, max_chars: int = 4000, offset: int = 0) -> ToolResult:
+        """HTTP fetch a URL, extract main content as Markdown, paginate.
+
+        Re-visits in the same session hit a per-process cache (no re-download).
+        Use `offset` to read further into long pages.
+        """
+        # Lazy import keeps Tools loadable when browser deps aren't installed.
+        from browser import visit_url
+        return visit_url(url, max_chars, offset)
+
+    @staticmethod
+    def web_search(query: str, max_results: int = 5) -> ToolResult:
+        """Search the web via DuckDuckGo and return top-N {title, url, snippet}.
+
+        Pair with `browser_visit` on the most relevant URL returned.
+        """
+        from browser import search_web
+        return search_web(query, max_results)
+
+    @staticmethod
     def run_python(code: str = "", script_path: str = "",
                    timeout: int = 120) -> ToolResult:
         """Run Python code (inline) or a script file in a subprocess.

@@ -336,6 +336,82 @@ def test_feedback_disabled_returns_none():
     print("\n✅ Disabled feedback returns None")
 
 
+def test_browser_invalid_url_rejected():
+    """Test: visit_url rejects non-http URLs and empty strings (no network)."""
+    print("\n" + "="*60)
+    print("TEST 16: browser_visit — invalid URL rejected")
+    print("="*60)
+    from src.browser import visit_url
+    for bad in ("", "not-a-url", "ftp://example.com", "javascript:alert(1)"):
+        r = visit_url(bad)
+        assert not r.success, f"expected rejection for {bad!r}, got success"
+        assert "http" in (r.error or "").lower()
+    print("\n✅ Invalid URLs rejected before any network call")
+
+
+def test_browser_deny_host_blocks_localhost():
+    """Test: AGENT_BROWSER_DENY_HOSTS blocks matching hostnames pre-fetch."""
+    print("\n" + "="*60)
+    print("TEST 17: browser_visit — deny-host blocks localhost")
+    print("="*60)
+    from src.browser import visit_url
+    os.environ["AGENT_BROWSER_DENY_HOSTS"] = "localhost,127.0.0.1,internal.corp"
+    try:
+        r1 = visit_url("http://localhost:8080/admin")
+        assert not r1.success and "deny list" in r1.error
+        r2 = visit_url("http://api.internal.corp/secret")
+        assert not r2.success and "deny list" in r2.error
+        # Non-matching host should not be blocked by the env var (will then
+        # fail for some *other* reason because we don't actually fetch here,
+        # but pre-network rejection should not fire).
+        # Use a clearly fake host so trafilatura/requests doesn't actually do
+        # anything heavy — we just want to confirm the deny check returns None.
+        from src.browser import _is_denied
+        assert not _is_denied("https://example.com/")
+    finally:
+        os.environ.pop("AGENT_BROWSER_DENY_HOSTS", None)
+    print("\n✅ Deny-host list blocks matching URLs pre-network")
+
+
+def test_browser_pagination_via_offset():
+    """Test: offset parameter slices the cached content with a 'use offset=X' footer."""
+    print("\n" + "="*60)
+    print("TEST 18: browser_visit — pagination via offset")
+    print("="*60)
+    from src import browser
+    from src.browser import visit_url, _hash_url
+
+    # Pre-populate cache to avoid any network call.
+    fake_url = "https://example.com/big-doc"
+    fake_content = ("ABC123" * 2000)  # 12000 chars
+    browser._URL_CACHE[_hash_url(fake_url)] = fake_content
+
+    try:
+        # First page: offset 0, max 100.
+        r1 = visit_url(fake_url, max_chars=100, offset=0)
+        assert r1.success
+        assert "[browser_visit]" in r1.output and "fake" not in r1.output
+        assert "use offset=100" in r1.output.lower(), f"missing pagination hint: {r1.output[-200:]!r}"
+
+        # Mid-document.
+        r2 = visit_url(fake_url, max_chars=100, offset=5000)
+        assert r2.success
+        assert "use offset=5100" in r2.output.lower()
+
+        # Past the end.
+        r3 = visit_url(fake_url, max_chars=100, offset=99999)
+        assert r3.success
+        assert "empty" in r3.output.lower()
+
+        # Invalid offset.
+        r4 = visit_url(fake_url, max_chars=100, offset=-1)
+        assert not r4.success
+        assert "offset" in r4.error.lower()
+    finally:
+        browser._URL_CACHE.pop(_hash_url(fake_url), None)
+    print("\n✅ Pagination, end-of-content and invalid-offset all behave correctly")
+
+
 def test_feedback_skipped_for_non_matching_tool():
     """Test: Verifiers whose applies_to() returns False produce no output."""
     print("\n" + "="*60)
@@ -377,6 +453,11 @@ def run_all_tests():
     test_feedback_json_syntax_fail()
     test_feedback_disabled_returns_none()
     test_feedback_skipped_for_non_matching_tool()
+
+    # Offline browser tests — pre-populate cache, no real network.
+    test_browser_invalid_url_rejected()
+    test_browser_deny_host_blocks_localhost()
+    test_browser_pagination_via_offset()
 
     input("\nPress Enter to run API-backed tests (or Ctrl+C to stop here)...")
 

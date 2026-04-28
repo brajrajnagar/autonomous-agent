@@ -274,4 +274,15 @@ class Executor:
                 script_path=parameters.get("script_path", ""),
                 timeout=int(parameters.get("timeout", 120)),
             )
+        if tool_name == "browser_visit":
+            return self.tools.browser_visit(
+                parameters.get("url", ""),
+                int(parameters.get("max_chars", 4000)),
+                int(parameters.get("offset", 0)),
+            )
+        if tool_name == "web_search":
+            return self.tools.web_search(
+                parameters.get("query", ""),
+                int(parameters.get("max_results", 5)),
+            )
         return ToolResult(success=False, output="", error=f"Unknown tool: {tool_name}")
