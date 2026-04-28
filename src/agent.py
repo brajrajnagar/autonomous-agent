@@ -700,7 +700,10 @@ Respond with either:
                 max_tokens=1000
             )
             
-            llm_response = response.choices[0].message.content.strip()
+            llm_response = response.choices[0].message.content
+            if llm_response is None:
+                llm_response = "I need to think more about this task."
+            llm_response = llm_response.strip()
             print(f"LLM Response: {llm_response[:200]}...")
             
             # Parse response
