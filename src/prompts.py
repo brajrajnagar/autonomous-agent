@@ -121,6 +121,34 @@ CRITIC SUGGESTIONS: {suggestions_json}
 USER FEEDBACK: {user_text}"""
 
 
+REPLAN_PROMPT = """You are a recovery planner. A step in the plan failed (didn't complete in its iteration budget). Decide how to recover.
+
+Available actions:
+- "retry": same step, same description, give it another iteration budget. Use when the failure looks transient (network blip, near-miss).
+- "revise_step": same step id, but emit a more concrete description and/or success_criterion. Use when the original was too vague or asked for too much.
+- "revise_plan": replace this step AND all subsequent steps with a new sequence. Use when the approach was fundamentally wrong, not just the wording.
+- "skip": mark this step failed but proceed to the next step. Only safe if subsequent steps don't depend on this one.
+- "abort": stop execution and return partial results. Use when the failure is unrecoverable.
+
+Respond with strict JSON only (no prose, no markdown fences):
+{{"action": "retry" | "revise_step" | "revise_plan" | "skip" | "abort",
+  "reasoning": "one short sentence",
+  "revised_step": {{"id": <int>, "description": "...", "success_criterion": "..."}},
+  "revised_steps": [{{"id": <int>, "description": "...", "success_criterion": "..."}}, ...]}}
+
+Rules:
+- Set "revised_step" only when action is "revise_step"; null/omit otherwise.
+- Set "revised_steps" only when action is "revise_plan"; null/omit otherwise. Steps must include the failing one (revised) plus any remaining work.
+- Be biased toward "revise_step" for vague descriptions and "retry" for transient errors. Prefer "abort" only when no progress is plausible.
+
+ORIGINAL TASK: {task}
+ORIGINAL PLAN: {plan_json}
+FAILED STEP: {failed_step_json}
+FAILURE REASON: {failure_reason}
+RECENT OBSERVATIONS:
+{observations}"""
+
+
 CRITIC_REVIEW_PROMPT = """
 You are a critic/reviewer. Review the following task completion:
 

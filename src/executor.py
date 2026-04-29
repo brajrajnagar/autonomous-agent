@@ -41,7 +41,12 @@ class Executor:
                  max_iterations: int, max_tokens_tao: int,
                  logger: Optional[Any] = None,
                  feedback: Optional[Any] = None,
-                 context_manager: Optional[Any] = None):
+                 context_manager: Optional[Any] = None,
+                 planner: Optional[Any] = None,
+                 replanning_enabled: bool = True,
+                 max_replans_per_step: int = 2,
+                 max_replans_per_run: int = 5,
+                 autonomy: str = "auto"):
         self.client = client
         self.model = model
         self.tools = tools
@@ -50,6 +55,11 @@ class Executor:
         self.logger = logger
         self.feedback = feedback
         self.context = context_manager
+        self.planner = planner
+        self.replanning_enabled = replanning_enabled
+        self.max_replans_per_step = max_replans_per_step
+        self.max_replans_per_run = max_replans_per_run
+        self.autonomy = autonomy
         # Multi-turn message accumulator. Reset by execute_plan/legacy_execute
         # at the start of each top-level invocation; mutated by run_tao_loop.
         self._messages: List[Dict[str, Any]] = []
@@ -57,53 +67,222 @@ class Executor:
     # ---- Entry points --------------------------------------------------------
 
     def execute_plan(self, state: AgentState, task: str, plan: Dict[str, Any]) -> str:
-        """Run T-A-O once per plan step, sharing messages across steps."""
+        """Run T-A-O once per plan step. On step failure, optionally replan
+        (retry / revise_step / revise_plan / skip / abort) before continuing.
+        """
         state.task = task
         state.plan = plan
         self._messages = self._initial_messages(task)
 
         step_results: List[str] = []
-        steps = plan.get("steps", [])
-        for step in steps:
-            state.current_step = step
-            print(C.step(f"\n{'━' * 60}"))
-            print(C.step(f"▶️  STEP {step['id']}/{len(steps)}:") + f" {step.get('description', '')}")
-            print(f"   {C.dim('Success:')} {C.dim(step.get('success_criterion', ''))}")
-            print(C.step(f"{'━' * 60}"))
-            if self.logger:
-                self.logger.log("step_start", {
-                    "step_id": step.get("id"),
-                    "description": step.get("description", ""),
-                    "success_criterion": step.get("success_criterion", ""),
-                })
+        steps: List[Dict[str, Any]] = list(plan.get("steps", []))
+        cursor = 0
+        replans_this_run = 0
 
-            # Append a user message that scopes the model to THIS step.
-            self._messages.append({
-                "role": "user",
-                "content": (
-                    f"Now do Step {step.get('id')}: {step.get('description', '')}\n"
-                    f"Success criterion: {step.get('success_criterion', '')}\n"
-                    f"Call complete_task when this step is done."
-                ),
-            })
+        while cursor < len(steps):
+            step = steps[cursor]
+            replans_this_step = 0
+            attempt = 0
 
-            step_result = self.run_tao_loop(state, self.max_iterations, step_id=step.get("id"))
-            step_results.append(f"[Step {step['id']}] {step_result}")
-            if self.logger:
-                self.logger.log("step_complete", {
-                    "step_id": step.get("id"),
-                    "iterations_used": state.iteration_count,
-                    "completed": state.is_complete,
-                })
-            # Step-boundary compaction: replace the just-completed step's
-            # iteration history with a one-line summary before the next
-            # step begins. Free, deterministic, no LLM call.
-            if self.context:
-                self._messages = self.context.compact_step_boundary(
-                    self._messages, state, step, step_result,
+            while True:
+                attempt += 1
+                state.current_step = step
+
+                # Header + step_start log only on the first attempt; later
+                # attempts print a clear "retry" / "revised" banner instead.
+                if attempt == 1:
+                    print(C.step(f"\n{'━' * 60}"))
+                    print(C.step(f"▶️  STEP {step['id']}/{len(steps)}:") + f" {step.get('description', '')}")
+                    print(f"   {C.dim('Success:')} {C.dim(step.get('success_criterion', ''))}")
+                    print(C.step(f"{'━' * 60}"))
+                    if self.logger:
+                        self.logger.log("step_start", {
+                            "step_id": step.get("id"),
+                            "description": step.get("description", ""),
+                            "success_criterion": step.get("success_criterion", ""),
+                        })
+                    self._messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Now do Step {step.get('id')}: {step.get('description', '')}\n"
+                            f"Success criterion: {step.get('success_criterion', '')}\n"
+                            f"Call complete_task when this step is done."
+                        ),
+                    })
+
+                step_result = self.run_tao_loop(state, self.max_iterations, step_id=step.get("id"))
+
+                if self.logger:
+                    self.logger.log("step_complete", {
+                        "step_id": step.get("id"),
+                        "iterations_used": state.iteration_count,
+                        "completed": state.is_complete,
+                        "attempt": attempt,
+                    })
+
+                # Success path.
+                if state.is_complete:
+                    step_results.append(f"[Step {step['id']}] {step_result}")
+                    if self.context:
+                        self._messages = self.context.compact_step_boundary(
+                            self._messages, state, step, step_result,
+                        )
+                    cursor += 1
+                    break
+
+                # Failure path: hit the iteration cap. Decide whether to replan.
+                failure_reason = (
+                    f"iteration cap ({self.max_iterations}) reached without complete_task"
                 )
+                budget_exhausted = (
+                    not self.replanning_enabled
+                    or self.planner is None
+                    or replans_this_step >= self.max_replans_per_step
+                    or replans_this_run >= self.max_replans_per_run
+                )
+                if budget_exhausted:
+                    print(C.err(
+                        f"❌ Step {step['id']} did not complete and replan budget is exhausted; "
+                        "treating step as failed."
+                    ))
+                    if self.logger:
+                        self.logger.log("step_failed", {
+                            "step_id": step.get("id"),
+                            "reason": failure_reason,
+                            "replans_used": replans_this_step,
+                        })
+                    step_results.append(f"[Step {step['id']} FAILED] {step_result}")
+                    cursor += 1
+                    break
+
+                # Trigger replan.
+                replans_this_step += 1
+                replans_this_run += 1
+                print(C.warn(
+                    f"\n🔁 Step {step['id']} did not complete. Asking planner to replan "
+                    f"(attempt {replans_this_step}/{self.max_replans_per_step})..."
+                ))
+                if self.logger:
+                    self.logger.log("replan_triggered", {
+                        "step_id": step.get("id"),
+                        "reason": failure_reason,
+                        "replan_count": replans_this_step,
+                    })
+
+                decision = self.planner.replan(
+                    task, plan, step, failure_reason,
+                    state.observation_history[-5:],
+                )
+                action = decision.get("action", "abort")
+                reasoning = decision.get("reasoning", "")
+                print(C.phase(f"   planner chose: {action}") + C.dim(f" — {reasoning}"))
+
+                # Interactive override.
+                if self.autonomy == "interactive":
+                    action = self._prompt_user_for_replan(decision)
+
+                if self.logger:
+                    self.logger.log("replan_decided", {
+                        "step_id": step.get("id"),
+                        "action": action,
+                        "reasoning": reasoning,
+                    })
+
+                # Apply the action.
+                if action == "retry":
+                    self._messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[Replan] Step {step['id']} did not complete in "
+                            f"{self.max_iterations} iterations. Retry the same step "
+                            f"with a fresh budget."
+                        ),
+                    })
+                    continue  # inner retry loop
+
+                if action == "revise_step":
+                    revised = decision.get("revised_step") or step
+                    revised.setdefault("id", step["id"])
+                    steps[cursor] = revised
+                    step = revised
+                    self._messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[Replan] Step {step['id']} has been revised:\n"
+                            f"  description: {revised.get('description', '')}\n"
+                            f"  success_criterion: {revised.get('success_criterion', '')}\n"
+                            f"Continue with the revised step."
+                        ),
+                    })
+                    continue
+
+                if action == "revise_plan":
+                    revised_steps = decision.get("revised_steps") or [step]
+                    steps = steps[:cursor] + list(revised_steps)
+                    state.plan = {"summary": plan.get("summary", ""), "steps": steps}
+                    step = steps[cursor]
+                    self._messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[Replan] The plan from Step {step.get('id')} onward has been "
+                            f"revised to {len(revised_steps)} new step(s). "
+                            f"Continuing with the new plan."
+                        ),
+                    })
+                    if self.logger:
+                        self.logger.log("plan_revised", {
+                            "from_step": step.get("id"),
+                            "new_step_count": len(revised_steps),
+                        })
+                    continue
+
+                if action == "skip":
+                    print(C.warn(f"⏭  Skipping step {step['id']} per replan decision."))
+                    if self.logger:
+                        self.logger.log("step_skipped", {"step_id": step.get("id")})
+                    step_results.append(f"[Step {step['id']} SKIPPED] {reasoning}")
+                    cursor += 1
+                    break
+
+                if action == "abort":
+                    print(C.err(f"🛑 Aborting run per replan decision."))
+                    if self.logger:
+                        self.logger.log("run_aborted", {
+                            "step_id": step.get("id"),
+                            "reasoning": reasoning,
+                        })
+                    step_results.append(f"[Step {step['id']} ABORTED] {reasoning}")
+                    state.current_step = None
+                    return "\n\n".join(step_results)
+
+                # Unknown action — defensive: treat as abort.
+                step_results.append(f"[Step {step['id']} ABORTED] unknown action: {action}")
+                state.current_step = None
+                return "\n\n".join(step_results)
+
         state.current_step = None
         return "\n\n".join(step_results)
+
+    def _prompt_user_for_replan(self, decision: Dict[str, Any]) -> str:
+        """Show the planner's recommendation and let the user override.
+
+        Returns the final action string. Used only when autonomy='interactive'.
+        """
+        action = decision.get("action", "abort")
+        reasoning = decision.get("reasoning", "")
+        print(C.hint(f"\nPlanner suggests: {action} — {reasoning}"))
+        print(C.dim(
+            "Type 'go' / Enter to accept, or one of: retry, skip, abort"
+        ))
+        try:
+            user_input = input(f"{C.BR_GREEN}> {C.RESET}").strip().lower()
+        except EOFError:
+            return action
+        if user_input in ("", "go", "ok", "yes", "y"):
+            return action
+        if user_input in ("retry", "skip", "abort"):
+            return user_input
+        return action  # fall back to planner's choice on unrecognized input
 
     def legacy_execute(self, state: AgentState, task: str) -> str:
         """No-plan path: a single T-A-O loop with a fresh messages list."""

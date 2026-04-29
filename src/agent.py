@@ -49,6 +49,12 @@ class AutonomousAgent:
         self.planning_enabled = os.getenv("AGENT_PLANNING_ENABLED", "true").lower() == "true"
         max_plan_refinements = int(os.getenv("AGENT_MAX_PLAN_REFINEMENTS", "5"))
 
+        # Mid-execution replanning: when a step hits the iteration cap, ask
+        # the planner what to do (retry / revise_step / revise_plan / skip / abort).
+        self.replanning_enabled = os.getenv("AGENT_REPLANNING_ENABLED", "true").lower() == "true"
+        max_replans_per_step = int(os.getenv("AGENT_MAX_REPLANS_PER_STEP", "2"))
+        max_replans_per_run = int(os.getenv("AGENT_MAX_REPLANS_PER_RUN", "5"))
+
         # Autonomy mode selects how much ceremony each task gets:
         #   auto         → triage classifies (simple → no plan; standard → silent plan; complex → full review)
         #   interactive  → always full plan + critique + user review (current legacy)
@@ -90,6 +96,11 @@ class AutonomousAgent:
             max_iterations=self.max_iterations, max_tokens_tao=max_tokens_tao,
             logger=self.logger, feedback=self.feedback,
             context_manager=self.context,
+            planner=self.planner,
+            replanning_enabled=self.replanning_enabled,
+            max_replans_per_step=max_replans_per_step,
+            max_replans_per_run=max_replans_per_run,
+            autonomy=self.autonomy,
         )
         self.critic = Critic(
             client=self.client, model=self.model, max_tokens=max_tokens_critic,

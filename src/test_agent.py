@@ -964,6 +964,203 @@ def test_read_file_modes():
     print("\n✅ read_file head/tail/slice all behave correctly")
 
 
+def _build_executor_with_mocks(planner_decisions, run_results,
+                                max_replans_per_step=2,
+                                max_replans_per_run=5):
+    """Build an Executor with a mocked planner and a mocked run_tao_loop.
+
+    `planner_decisions` is a list of decision dicts the planner returns in order.
+    `run_results` is a list of (state.is_complete, return_string) tuples; the
+    Nth call to run_tao_loop pulls the Nth tuple.
+    """
+    from src.executor import Executor
+
+    class _MockPlanner:
+        def __init__(self, decisions):
+            self._decisions = list(decisions)
+            self.calls = []
+
+        def replan(self, task, plan, failed_step, reason, recent_obs):
+            self.calls.append({
+                "task": task, "step_id": failed_step.get("id"), "reason": reason,
+            })
+            return self._decisions.pop(0) if self._decisions else {"action": "abort"}
+
+    planner = _MockPlanner(planner_decisions)
+
+    class _CountingExecutor(Executor):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._results = list(run_results)
+            self.tao_calls: list[dict] = []
+
+        def run_tao_loop(self, state, max_iters, step_id=None):
+            ok, output = self._results.pop(0) if self._results else (False, "no result")
+            self.tao_calls.append({"step_id": step_id, "ok": ok})
+            state.is_complete = ok
+            state.iteration_count = max_iters if not ok else 1
+            if ok:
+                state.final_answer = output
+            return output
+
+    return _CountingExecutor(
+        client=None, model="x", tools=None,
+        max_iterations=3, max_tokens_tao=1,
+        planner=planner,
+        replanning_enabled=True,
+        max_replans_per_step=max_replans_per_step,
+        max_replans_per_run=max_replans_per_run,
+        autonomy="auto",
+    ), planner
+
+
+def test_replan_retry_then_succeed():
+    """Test: step fails once → replan retry → step succeeds on attempt 2."""
+    print("\n" + "="*60)
+    print("TEST 39: replan — retry → succeed")
+    print("="*60)
+    from src.state import AgentState
+    plan = {"summary": "x", "steps": [
+        {"id": 1, "description": "do thing", "success_criterion": "thing done"},
+    ]}
+    decisions = [{"action": "retry", "reasoning": "transient"}]
+    results = [(False, "iteration cap"), (True, "done!")]
+    executor, planner = _build_executor_with_mocks(decisions, results)
+    state = AgentState(task="t")
+    out = executor.execute_plan(state, "t", plan)
+
+    assert len(executor.tao_calls) == 2, f"expected 2 tao calls, got {len(executor.tao_calls)}"
+    assert len(planner.calls) == 1, "planner should be called once"
+    assert "Step 1" in out and "done!" in out
+    assert "FAILED" not in out and "ABORTED" not in out
+    print("\n✅ Retry path: step rerun and completed on second attempt")
+
+
+def test_replan_revise_step_updates_description():
+    """Test: revise_step replaces the step's description before retrying."""
+    print("\n" + "="*60)
+    print("TEST 40: replan — revise_step updates step")
+    print("="*60)
+    from src.state import AgentState
+    plan = {"summary": "x", "steps": [
+        {"id": 1, "description": "vague", "success_criterion": "vague"},
+    ]}
+    revised = {"id": 1, "description": "concrete & specific",
+               "success_criterion": "specific check"}
+    decisions = [{"action": "revise_step", "reasoning": "too vague",
+                  "revised_step": revised}]
+    results = [(False, "cap"), (True, "ok")]
+    executor, planner = _build_executor_with_mocks(decisions, results)
+    state = AgentState(task="t")
+    out = executor.execute_plan(state, "t", plan)
+
+    # The 2nd run_tao_loop saw the revised step (we can't inspect step directly,
+    # but the user message should reference the new description in self._messages).
+    msgs_text = " ".join(m.get("content") or "" for m in executor._messages)
+    assert "concrete & specific" in msgs_text, "revised description should appear in messages"
+    assert "[Replan]" in msgs_text, "replan note should appear in messages"
+    assert "ok" in out
+    print("\n✅ Revise_step: step description was updated and retried")
+
+
+def test_replan_abort_after_step_cap():
+    """Test: planner returns retry repeatedly; cap is enforced and step is failed."""
+    print("\n" + "="*60)
+    print("TEST 41: replan — per-step cap forces failure")
+    print("="*60)
+    from src.state import AgentState
+    plan = {"summary": "x", "steps": [
+        {"id": 1, "description": "impossible", "success_criterion": "never"},
+    ]}
+    decisions = [{"action": "retry", "reasoning": "trying"}] * 5
+    # Step always fails; with max_replans_per_step=2 that means: initial run +
+    # 2 replans = 3 tao_calls before the step is marked failed.
+    results = [(False, "cap")] * 10
+    executor, planner = _build_executor_with_mocks(
+        decisions, results, max_replans_per_step=2,
+    )
+    state = AgentState(task="t")
+    out = executor.execute_plan(state, "t", plan)
+
+    assert len(executor.tao_calls) == 3, f"expected 3 attempts, got {len(executor.tao_calls)}"
+    assert len(planner.calls) == 2, f"expected 2 replans, got {len(planner.calls)}"
+    assert "FAILED" in out, f"step should be marked failed: {out!r}"
+    print("\n✅ Per-step replan cap respected; step ends as FAILED after 2 retries")
+
+
+def test_replan_abort_action_returns_immediately():
+    """Test: planner returns abort → execute_plan stops with partial results."""
+    print("\n" + "="*60)
+    print("TEST 42: replan — abort action stops execution")
+    print("="*60)
+    from src.state import AgentState
+    plan = {"summary": "x", "steps": [
+        {"id": 1, "description": "a", "success_criterion": "a done"},
+        {"id": 2, "description": "b", "success_criterion": "b done"},
+    ]}
+    decisions = [{"action": "abort", "reasoning": "unrecoverable"}]
+    # Step 1 fails. Planner aborts. Step 2 should never run.
+    results = [(False, "cap")]
+    executor, planner = _build_executor_with_mocks(decisions, results)
+    state = AgentState(task="t")
+    out = executor.execute_plan(state, "t", plan)
+
+    assert len(executor.tao_calls) == 1, "step 2 should NOT run after abort"
+    assert "ABORTED" in out
+    assert "Step 2" not in out, "step 2 should not appear in output"
+    print("\n✅ Abort action: execute_plan halts before later steps")
+
+
+def test_replan_skip_continues_to_next_step():
+    """Test: planner returns skip → step is logged as skipped, next step runs."""
+    print("\n" + "="*60)
+    print("TEST 43: replan — skip continues")
+    print("="*60)
+    from src.state import AgentState
+    plan = {"summary": "x", "steps": [
+        {"id": 1, "description": "cosmetic", "success_criterion": "x"},
+        {"id": 2, "description": "real work", "success_criterion": "y"},
+    ]}
+    decisions = [{"action": "skip", "reasoning": "non-critical"}]
+    # Step 1 fails. Planner skips. Step 2 runs and succeeds.
+    results = [(False, "cap"), (True, "step 2 done")]
+    executor, planner = _build_executor_with_mocks(decisions, results)
+    state = AgentState(task="t")
+    out = executor.execute_plan(state, "t", plan)
+
+    assert len(executor.tao_calls) == 2, "step 2 should run after skip"
+    assert "SKIPPED" in out and "step 2 done" in out
+    print("\n✅ Skip action: failed step marked skipped, next step ran")
+
+
+def test_replan_global_cap_enforced():
+    """Test: AGENT_MAX_REPLANS_PER_RUN caps total replans across all steps."""
+    print("\n" + "="*60)
+    print("TEST 44: replan — global per-run cap")
+    print("="*60)
+    from src.state import AgentState
+    plan = {"summary": "x", "steps": [
+        {"id": 1, "description": "a", "success_criterion": "a"},
+        {"id": 2, "description": "b", "success_criterion": "b"},
+    ]}
+    # Each step always fails; both want retries. Global cap=1 means after the
+    # first replan we must stop replanning entirely.
+    decisions = [{"action": "retry", "reasoning": "a"}] * 10
+    results = [(False, "cap")] * 10
+    executor, planner = _build_executor_with_mocks(
+        decisions, results,
+        max_replans_per_step=5, max_replans_per_run=1,
+    )
+    state = AgentState(task="t")
+    out = executor.execute_plan(state, "t", plan)
+
+    # Step 1: initial run + 1 replan retry = 2 calls; then global cap hit, step
+    # marked FAILED. Step 2: initial run; no more replans allowed → FAILED.
+    assert len(planner.calls) == 1, f"expected 1 replan total, got {len(planner.calls)}"
+    assert out.count("FAILED") == 2, f"both steps should fail: {out!r}"
+    print("\n✅ Global per-run replan cap respected across multiple steps")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "="*60)
@@ -1016,6 +1213,14 @@ def run_all_tests():
     test_context_step_boundary_compaction()
     test_context_disabled_returns_input_unchanged()
     test_read_file_modes()
+
+    # Mid-execution replanning.
+    test_replan_retry_then_succeed()
+    test_replan_revise_step_updates_description()
+    test_replan_abort_after_step_cap()
+    test_replan_abort_action_returns_immediately()
+    test_replan_skip_continues_to_next_step()
+    test_replan_global_cap_enforced()
 
     input("\nPress Enter to run API-backed tests (or Ctrl+C to stop here)...")
 

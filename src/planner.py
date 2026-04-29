@@ -7,7 +7,7 @@ from colors import C
 from parsing import safe_json_parse
 from prompts import (
     INITIAL_PLAN_PROMPT, PLAN_CRITIQUE_PROMPT, PLAN_REFINE_PROMPT,
-    TRIAGE_PROMPT, system_prefix,
+    REPLAN_PROMPT, TRIAGE_PROMPT, system_prefix,
 )
 
 
@@ -111,6 +111,72 @@ class Planner:
             return []
         return [s for s in parsed["suggestions"]
                 if isinstance(s, dict) and "issue" in s and "fix" in s]
+
+    def replan(self, task: str, original_plan: Dict[str, Any],
+               failed_step: Dict[str, Any], failure_reason: str,
+               recent_observations: List[str]) -> Dict[str, Any]:
+        """LLM call: choose how to recover from a failed step.
+
+        Returns a dict with at least `action` ∈ {"retry", "revise_step",
+        "revise_plan", "skip", "abort"} and `reasoning`. Falls back to
+        "retry" when revision payloads are malformed (better to give the
+        agent another shot than to abort on a parser glitch).
+        """
+        obs_text = "\n".join(
+            f"- {(o or '').replace(chr(10), ' ')[:200]}"
+            for o in (recent_observations[-5:] if recent_observations else [])
+        ) or "(no observations recorded)"
+        prompt = REPLAN_PROMPT.format(
+            task=task,
+            plan_json=json.dumps(original_plan, indent=2),
+            failed_step_json=json.dumps(failed_step, indent=2),
+            failure_reason=failure_reason,
+            observations=obs_text,
+        )
+        raw = self._llm_call(
+            "You are a recovery planner. Output strict JSON only.",
+            prompt, temperature=0.4, max_tokens=2000,
+        )
+        parsed = safe_json_parse(raw)
+        VALID = ("retry", "revise_step", "revise_plan", "skip", "abort")
+
+        if not parsed or parsed.get("action") not in VALID:
+            return {
+                "action": "retry",
+                "reasoning": "replan response unparseable; retrying with fresh budget",
+            }
+
+        action = parsed["action"]
+        reasoning = str(parsed.get("reasoning", "")).strip() or "(no reasoning provided)"
+
+        if action == "revise_step":
+            rs = parsed.get("revised_step")
+            if not isinstance(rs, dict) or not rs.get("description"):
+                return {"action": "retry",
+                        "reasoning": "revise_step payload malformed; retrying instead"}
+            rs.setdefault("id", failed_step.get("id", 1))
+            rs.setdefault("success_criterion", failed_step.get("success_criterion", "Step is complete"))
+            return {"action": "revise_step", "reasoning": reasoning, "revised_step": rs}
+
+        if action == "revise_plan":
+            rs_list = parsed.get("revised_steps")
+            if not isinstance(rs_list, list) or not rs_list:
+                return {"action": "retry",
+                        "reasoning": "revise_plan payload malformed; retrying instead"}
+            normalized = []
+            for i, step in enumerate(rs_list, start=failed_step.get("id", 1)):
+                if not isinstance(step, dict) or not step.get("description"):
+                    continue
+                step.setdefault("id", i)
+                step.setdefault("success_criterion", "Step is complete")
+                normalized.append(step)
+            if not normalized:
+                return {"action": "retry",
+                        "reasoning": "all revised_steps malformed; retrying instead"}
+            return {"action": "revise_plan", "reasoning": reasoning,
+                    "revised_steps": normalized}
+
+        return {"action": action, "reasoning": reasoning}
 
     def refine_plan(self, task: str, plan: Dict[str, Any], user_feedback: str,
                     suggestions: List[Dict[str, str]]) -> Dict[str, Any]:
