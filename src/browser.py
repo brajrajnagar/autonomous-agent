@@ -34,6 +34,99 @@ _REQUEST_TIMEOUT = 20
 # Resets on every Python invocation, which matches the "per-session" scope.
 _URL_CACHE: Dict[str, str] = {}
 
+# Per-process rewrite cache: { original_query -> rewritten_query }.
+# Avoids re-paying for the LLM rewrite call when the agent searches the same
+# vague query twice in one session.
+_REWRITE_CACHE: Dict[str, str] = {}
+
+# Lazy OpenAI client used for query rewriting; created on first use so that
+# importing browser doesn't require an API key.
+_REWRITER_CLIENT = None
+
+
+_REWRITE_PROMPT = """Rewrite the user's query as a high-signal web search.
+
+Rules:
+- Replace vague time words ("latest", "current", "recent", "now", "today") with concrete dates. Today's date is {today}, so include the year and month when relevant.
+- When the query is about a specific tool/platform/library, add a `site:` qualifier toward that platform's docs (e.g. site:docs.python.org, site:pytorch.org).
+- Prefer specificity (concrete names, dates, version numbers) over breadth.
+- Output 3 to 12 keywords, lowercase preferred.
+- Keep proper nouns capitalized when they are official names.
+
+Output the rewritten query as plain text only. No quotes, no preamble, no explanation, no extra lines.
+
+USER QUERY: {query}"""
+
+
+_OPERATOR_INDICATORS = ('"', 'site:', 'intitle:', 'inurl:', 'filetype:', ' OR ', ' -', '+')
+
+
+def _looks_already_specific(query: str) -> bool:
+    """True when the query has explicit search operators — the user (or
+    agent) already knows what they want, so skip rewriting."""
+    return any(ind in query for ind in _OPERATOR_INDICATORS)
+
+
+def _get_rewriter_client():
+    """Lazily build (and cache) an OpenAI client for query rewriting."""
+    global _REWRITER_CLIENT
+    if _REWRITER_CLIENT is None:
+        from openai import OpenAI
+        _REWRITER_CLIENT = OpenAI(
+            base_url=os.getenv("OPENAI_API_BASE"),
+            api_key=os.getenv("OPENAI_API_KEY"),
+        )
+    return _REWRITER_CLIENT
+
+
+def rewrite_query(query: str) -> str:
+    """Return a higher-signal version of `query` for web search.
+
+    Falls back to the original query on any error (disabled, no API key,
+    LLM failure, malformed output, query already has operators). Cached
+    per-process by query string so repeated searches don't re-pay.
+    """
+    if not query or not query.strip():
+        return query
+    if os.getenv("AGENT_SEARCH_REWRITE_ENABLED", "true").lower() != "true":
+        return query
+    if _looks_already_specific(query):
+        return query
+    if query in _REWRITE_CACHE:
+        return _REWRITE_CACHE[query]
+    if not os.getenv("OPENAI_API_KEY"):
+        return query
+
+    try:
+        from datetime import datetime
+        client = _get_rewriter_client()
+        model = os.getenv("OPENAI_MODEL", "gpt-4")
+        today = datetime.now().strftime("%Y-%m-%d")
+        prompt = _REWRITE_PROMPT.format(query=query.strip(), today=today)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system",
+                 "content": "You rewrite user queries for web search. Output only the rewritten query as plain text, with no quotes or explanation."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            # Reasoning models (Qwen3.5 etc.) consume budget on internal CoT
+            # before emitting visible content, so be generous here.
+            max_tokens=1500,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        # Strip wrapping quotes / single line.
+        content = content.strip('"\'`').splitlines()[0].strip() if content else ""
+        # Defensive: empty or absurdly long output → fall back.
+        if not content or len(content) > 200 or content.lower() == query.strip().lower():
+            return query
+        _REWRITE_CACHE[query] = content
+        return content
+    except Exception:
+        # Any failure (network, parse, etc.) → preserve the original query.
+        return query
+
 # Phrases that indicate the page didn't actually deliver content (paywall,
 # JS-required app shell, captcha challenge, rate-limit page, etc.). When
 # the *extracted* content is short and matches one of these, we treat the
@@ -187,20 +280,26 @@ def visit_url(url: str, max_chars: int = 4000, offset: int = 0) -> ToolResult:
 def search_web(query: str, max_results: int = 5) -> ToolResult:
     """Search the web via DuckDuckGo HTML; return top-N {title, url, snippet}.
 
+    Before sending, the query is passed through `rewrite_query` to add date
+    qualifiers, site filters, and concrete keywords (no-op when disabled or
+    when the query already contains explicit operators).
+
     Uses the no-API-key HTML endpoint. Pair with `visit_url` on the most
     relevant URL returned. Free but flaky — if DuckDuckGo serves a captcha
-    page or rate-limits, this returns an empty/error result; swap to a
-    paid search API (Brave, Tavily) by changing this function.
+    page or rate-limits, this returns an empty/error result.
     """
     if not query.strip():
         return ToolResult(success=False, output="", error="Empty search query.")
     if max_results <= 0 or max_results > 20:
         return ToolResult(success=False, output="", error="max_results must be between 1 and 20.")
 
+    original_query = query.strip()
+    effective_query = rewrite_query(original_query)
+
     try:
         resp = requests.post(
             "https://html.duckduckgo.com/html/",
-            data={"q": query, "kl": "us-en"},
+            data={"q": effective_query, "kl": "us-en"},
             headers={"User-Agent": _USER_AGENT},
             timeout=_REQUEST_TIMEOUT,
         )
@@ -242,14 +341,19 @@ def search_web(query: str, max_results: int = 5) -> ToolResult:
                 "snippet": snippet,
             })
 
+    rewrite_note = (
+        f"\n[rewritten as: {effective_query}]"
+        if effective_query != original_query else ""
+    )
+
     if not results:
         return ToolResult(
             success=True,
-            output=(f"[web_search] {query}\n\nNo results parsed — DuckDuckGo "
-                    f"may have returned a captcha or changed its HTML."),
+            output=(f"[web_search] {original_query}{rewrite_note}\n\nNo results parsed — "
+                    f"DuckDuckGo may have returned a captcha or changed its HTML."),
         )
 
-    lines = [f"[web_search] {query}", ""]
+    lines = [f"[web_search] {original_query}{rewrite_note}", ""]
     for i, r in enumerate(results, 1):
         lines.append(f"{i}. {r['title']}")
         lines.append(f"   {r['url']}")

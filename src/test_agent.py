@@ -1161,6 +1161,109 @@ def test_replan_global_cap_enforced():
     print("\n✅ Global per-run replan cap respected across multiple steps")
 
 
+def test_rewrite_query_disabled_returns_original():
+    """Test: AGENT_SEARCH_REWRITE_ENABLED=false bypasses rewriting entirely."""
+    print("\n" + "="*60)
+    print("TEST 45: rewrite_query — disabled returns original")
+    print("="*60)
+    from src import browser
+    os.environ["AGENT_SEARCH_REWRITE_ENABLED"] = "false"
+    browser._REWRITE_CACHE.clear()
+    try:
+        assert browser.rewrite_query("latest news in ai") == "latest news in ai"
+    finally:
+        os.environ.pop("AGENT_SEARCH_REWRITE_ENABLED", None)
+    print("\n✅ Disabled rewrite returns the original query unchanged")
+
+
+def test_rewrite_query_skips_explicit_operators():
+    """Test: queries with quotes / site:/ etc. are passed through unchanged."""
+    print("\n" + "="*60)
+    print("TEST 46: rewrite_query — skip queries with operators")
+    print("="*60)
+    from src.browser import rewrite_query, _looks_already_specific
+    # Heuristic detector
+    assert _looks_already_specific('"exact phrase"')
+    assert _looks_already_specific('site:python.org dataclasses')
+    assert _looks_already_specific('intitle:tutorial pandas')
+    assert _looks_already_specific('python -django')
+    assert not _looks_already_specific('latest news in ai')
+    assert not _looks_already_specific('how does asyncio work')
+
+    # rewrite_query honors the heuristic — these stay unchanged with no LLM call.
+    for q in ('"exact phrase"', 'site:python.org dataclasses', 'pytorch -tensorflow'):
+        assert rewrite_query(q) == q, f"expected passthrough for {q!r}"
+    print("\n✅ Queries with explicit operators bypass the rewriter")
+
+
+def test_rewrite_query_caches_result():
+    """Test: identical queries hit the per-process cache (no second LLM call)."""
+    print("\n" + "="*60)
+    print("TEST 47: rewrite_query — caching")
+    print("="*60)
+    from src import browser
+    browser._REWRITE_CACHE.clear()
+    # Pre-populate the cache to simulate a prior rewrite, without firing the LLM.
+    browser._REWRITE_CACHE["latest python release"] = "Python 3.13 release notes 2026"
+    out = browser.rewrite_query("latest python release")
+    assert out == "Python 3.13 release notes 2026"
+    print("\n✅ Cached query returns the stored rewrite without calling the LLM")
+
+
+def test_rewrite_query_falls_back_on_no_api_key():
+    """Test: when OPENAI_API_KEY is unset, rewrite returns the original query."""
+    print("\n" + "="*60)
+    print("TEST 48: rewrite_query — falls back without API key")
+    print("="*60)
+    from src import browser
+    browser._REWRITE_CACHE.clear()
+    saved = os.environ.pop("OPENAI_API_KEY", None)
+    try:
+        out = browser.rewrite_query("uncached vague query")
+        assert out == "uncached vague query"
+    finally:
+        if saved is not None:
+            os.environ["OPENAI_API_KEY"] = saved
+    print("\n✅ Missing API key → rewrite gracefully returns original")
+
+
+def test_search_web_output_shows_rewrite_when_changed():
+    """Test: when the rewriter changes the query, the output mentions both."""
+    print("\n" + "="*60)
+    print("TEST 49: search_web output annotates rewrites")
+    print("="*60)
+    from src import browser
+    # Inject a known rewrite into the cache so the LLM call is bypassed.
+    original = "rewrite-test-query-abc"
+    rewritten = "rewritten test ABC keywords 2026"
+    browser._REWRITE_CACHE[original] = rewritten
+
+    # Stub the network call so we don't actually hit DDG.
+    class _StubResp:
+        status_code = 200
+        text = "<html></html>"  # No results — that's fine for header check.
+    saved_post = browser.requests.post
+    captured = {}
+    def fake_post(url, data=None, headers=None, timeout=None):
+        captured["data"] = data
+        return _StubResp()
+    browser.requests.post = fake_post
+    try:
+        result = browser.search_web(original, max_results=3)
+    finally:
+        browser.requests.post = saved_post
+
+    # The DDG fetch should have used the REWRITTEN query.
+    assert captured["data"]["q"] == rewritten, \
+        f"expected DDG to receive rewritten query, got {captured['data']['q']!r}"
+    # And the result output should annotate it for the agent to see.
+    assert original in result.output, "original query should appear in header"
+    assert "[rewritten as:" in result.output, \
+        f"output should annotate the rewrite: {result.output[:200]!r}"
+    assert rewritten in result.output
+    print("\n✅ search_web sends the rewritten query + annotates the output")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "="*60)
@@ -1221,6 +1324,13 @@ def run_all_tests():
     test_replan_abort_action_returns_immediately()
     test_replan_skip_continues_to_next_step()
     test_replan_global_cap_enforced()
+
+    # Web-search query rewriting.
+    test_rewrite_query_disabled_returns_original()
+    test_rewrite_query_skips_explicit_operators()
+    test_rewrite_query_caches_result()
+    test_rewrite_query_falls_back_on_no_api_key()
+    test_search_web_output_shows_rewrite_when_changed()
 
     input("\nPress Enter to run API-backed tests (or Ctrl+C to stop here)...")
 
