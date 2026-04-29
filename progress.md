@@ -109,14 +109,79 @@ _No active items. Ready for Phase 2._
 
 ---
 
-## 📝 Notes
+## ✅ Phase 2 COMPLETE — Context Compression & Memory Management
 
-- Using OpenAI-compatible API (provider-swappable).
-- Single LLM is reused for planning, critique, refinement, T-A-O, and final critic — different prompts and `max_tokens` budgets per call.
-- Each LLM call's `max_tokens` is configurable from `.env` to tune for cost vs. truncation risk.
-- Starting with simple venv; Docker sandbox is Phase 5.
-- Planning is on by default; set `AGENT_PLANNING_ENABLED=false` for trivial one-shot tasks where the overhead isn't worth it.
+The agent now manages long-running session context to prevent prompt explosion:
+
+### Phase 2 Deliverables
+
+- [x] **Rolling Window Compression** (`src/context.py`)
+  - Keeps only last N turns in full detail (default: 6)
+  - Older messages replaced with deterministic running summary
+  - Triggers when prompt exceeds `TOKEN_BUDGET * TRIGGER_RATIO`
+
+- [x] **Argument Stubbing**
+  - Large tool_call arguments (>300 chars) stubbed in old messages
+  - Replaced with: `<N chars; included in earlier turn>`
+  - Preserves tool_call integrity
+
+- [x] **Step-Boundary Compaction**
+  - After each plan step completes, collapse iteration history
+  - Replaces all step messages with single summary line
+  - Free, deterministic, no LLM call
+
+- [x] **Tool Output Capping**
+  - `read_file`: New `mode='head'|'tail'|'slice'` with offset/length
+  - `execute_shell`: Head+tail clipping preserves errors at bottom
+  - Default cap: 6000 chars per tool result
+
+- [x] **Configuration** (via `.env`)
+  - `AGENT_CONTEXT_COMPRESSION_ENABLED=true`
+  - `AGENT_CONTEXT_TOKEN_BUDGET=24000`
+  - `AGENT_CONTEXT_TRIGGER_RATIO=0.75`
+  - `AGENT_CONTEXT_RECENT_TURNS=6`
+  - `AGENT_TOOL_OUTPUT_CAP=6000`
 
 ---
 
-*Last Updated: Phase 1.5 — planning loop shipped*
+## ✅ Phase 3 COMPLETE — Mid-Execution Replanning
+
+When a step hits its iteration cap without completing, the planner now chooses a recovery action:
+
+### Phase 3 Deliverables
+
+- [x] **Recovery Actions**
+  - `retry`: Same step, fresh iteration budget
+  - `revise_step`: Update description/success_criterion
+  - `revise_plan`: Replace this step + all subsequent steps
+  - `skip`: Mark failed, continue to next step
+  - `abort`: Stop with partial results
+
+- [x] **Replan Budgets**
+  - `AGENT_MAX_REPLANS_PER_STEP=2` (per-step limit)
+  - `AGENT_MAX_REPLANS_PER_RUN=5` (per-run limit)
+  - Interactive mode allows user override
+
+- [x] **Execution Flow Rewrite**
+  - `execute_plan()` uses cursor-based iteration
+  - Nested retry loop per step
+  - Tracks `replans_this_step` and `replans_this_run`
+
+- [x] **Testing**
+  - 6 new tests: retry→succeed, revise_step, per-step cap, abort, skip, global cap
+
+---
+
+## 📝 Notes
+
+- Using OpenAI-compatible API (provider-swappable).
+- Single LLM is reused for planning, critique, refinement, T-A-O, replanning, and final critic — different prompts and `max_tokens` budgets per call.
+- Each LLM call's `max_tokens` is configurable from `.env` to tune for cost vs. truncation risk.
+- Starting with simple venv; Docker sandbox is Phase 5.
+- Planning is on by default; set `AGENT_PLANNING_ENABLED=false` for trivial one-shot tasks.
+- Context compression is on by default; set `AGENT_CONTEXT_COMPRESSION_ENABLED=false` to disable.
+- Replanning is on by default; set `AGENT_REPLANNING_ENABLED=false` to skip recovery.
+
+---
+
+*Last Updated: Phase 3 — Context compression + Mid-execution replanning shipped*
