@@ -38,13 +38,28 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the full contents of a file. Use a relative path.",
+            "description": (
+                "Read a file with paginated/clipped output. Use mode='head' "
+                "for the start of a file (default, safe for code), "
+                "mode='tail' for the end of a log, or mode='slice' with "
+                "offset+length to paginate large files. The result tells "
+                "you the next offset when there's more to read."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {
+                    "path": {"type": "string", "description": "Relative path to the file."},
+                    "mode": {
                         "type": "string",
-                        "description": "Relative path to the file to read.",
+                        "description": "'head' | 'tail' | 'slice' (default 'head').",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Start position when mode='slice' (default 0).",
+                    },
+                    "length": {
+                        "type": "integer",
+                        "description": "Max chars to read (default 6000).",
                     },
                 },
                 "required": ["path"],

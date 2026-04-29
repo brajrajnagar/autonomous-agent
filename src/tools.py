@@ -18,12 +18,38 @@ from state import ToolResult
 _SEARCH_SKIP_DIRS = {".git", "__pycache__", "venv", ".venv", "env", "node_modules", "logs"}
 
 
+def _head_tail_clip(text: str, max_chars: int, head_ratio: float = 0.5) -> str:
+    """Clip text to `max_chars` keeping a head and tail with an omission marker.
+
+    For shell output / large logs the relevant info often lives at both
+    ends (header at top, error/summary at bottom), so head-only truncation
+    loses signal. With head_ratio=0.5, half the budget is the head and
+    half is the tail.
+    """
+    if len(text) <= max_chars:
+        return text
+    head_size = int(max_chars * head_ratio)
+    tail_size = max_chars - head_size
+    omitted = len(text) - max_chars
+    return (
+        text[:head_size]
+        + f"\n[...{omitted} chars omitted...]\n"
+        + text[-tail_size:]
+    )
+
+
 class Tools:
     """Static tool implementations dispatched by `Executor._execute_tool`."""
 
     @staticmethod
-    def execute_shell(command: str, timeout: int = 60) -> ToolResult:
-        """Run a shell command and capture stdout/stderr."""
+    def execute_shell(command: str, timeout: int = 60,
+                      output_cap: int = 6000) -> ToolResult:
+        """Run a shell command and capture stdout/stderr.
+
+        Output is head+tail-clipped to `output_cap` chars. Shell output
+        usually has the relevant signal (errors, summary) at the *bottom*
+        — head-only truncation would lose it.
+        """
         try:
             result = subprocess.run(
                 command,
@@ -33,10 +59,13 @@ class Tools:
                 timeout=timeout,
                 cwd=os.getcwd(),
             )
+            stdout = _head_tail_clip(result.stdout or "", output_cap)
+            stderr_full = result.stderr or ""
+            stderr = _head_tail_clip(stderr_full, output_cap) if stderr_full else None
             return ToolResult(
                 success=result.returncode == 0,
-                output=result.stdout,
-                error=result.stderr if result.returncode != 0 else None,
+                output=stdout,
+                error=stderr if result.returncode != 0 else None,
             )
         except subprocess.TimeoutExpired:
             return ToolResult(
@@ -47,8 +76,20 @@ class Tools:
             return ToolResult(success=False, output="", error=str(e))
 
     @staticmethod
-    def read_file(path: str) -> ToolResult:
-        """Read the contents of a file. Absolute paths are rejected."""
+    def read_file(path: str, mode: str = "head", offset: int = 0,
+                  length: int = 6000) -> ToolResult:
+        """Read the contents of a file with paginated/clipped output.
+
+        mode:
+            "head"  → first `length` chars (default; safe for code files).
+            "tail"  → last `length` chars (good for logs).
+            "slice" → `length` chars starting at `offset`.
+
+        For very large files, paginate by calling read_file repeatedly
+        with mode="slice" and incrementing offset. The result is
+        annotated with the next-offset hint when there's more to read.
+        Absolute paths are rejected.
+        """
         try:
             if path.startswith("/"):
                 return ToolResult(
@@ -57,9 +98,43 @@ class Tools:
                 )
             if not os.path.exists(path):
                 return ToolResult(success=False, output="", error=f"File not found: {path}")
+            if mode not in ("head", "tail", "slice"):
+                return ToolResult(
+                    success=False, output="",
+                    error=f"Invalid mode '{mode}'. Use 'head', 'tail', or 'slice'.",
+                )
+            if length <= 0:
+                return ToolResult(success=False, output="", error="length must be > 0")
+            if offset < 0:
+                return ToolResult(success=False, output="", error="offset must be >= 0")
+
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read()
-            return ToolResult(success=True, output=content)
+            total = len(content)
+
+            if mode == "head":
+                chunk = content[:length]
+                start = 0
+            elif mode == "tail":
+                chunk = content[-length:]
+                start = max(0, total - length)
+            else:  # slice
+                if offset >= total:
+                    return ToolResult(
+                        success=True,
+                        output=f"(empty: offset={offset} >= total length {total})",
+                    )
+                chunk = content[offset:offset + length]
+                start = offset
+
+            output = chunk
+            end = start + len(chunk)
+            if end < total:
+                output += (
+                    f"\n[...truncated; {total} chars total. "
+                    f"Use mode='slice', offset={end} to continue reading.]"
+                )
+            return ToolResult(success=True, output=output)
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e))
 

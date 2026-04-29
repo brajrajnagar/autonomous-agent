@@ -669,6 +669,301 @@ src
     print("\n✅ XML tool-call fallback parser handles single, multi-arg, and empty cases")
 
 
+def _make_state(task="t", action_history=None, observation_history=None, plan=None):
+    """Build a minimal AgentState-like for context tests."""
+    from src.state import AgentState
+    s = AgentState(task=task)
+    if action_history:
+        s.action_history = list(action_history)
+    if observation_history:
+        s.observation_history = list(observation_history)
+    if plan:
+        s.plan = plan
+    return s
+
+
+def test_context_token_estimator():
+    """Test: token estimator uses len/4 and aggregates messages + tool_call args."""
+    print("\n" + "="*60)
+    print("TEST 31: ContextManager token estimator")
+    print("="*60)
+    from src.context import ContextManager
+    cm = ContextManager(token_budget=1000)
+    assert cm.estimate_tokens("") == 0
+    assert cm.estimate_tokens("abcd") == 1
+    assert cm.estimate_tokens("a" * 400) == 100
+
+    # Tool-call arguments contribute to the total.
+    msgs = [
+        {"role": "system", "content": "x" * 400},  # 100 tokens
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"function": {"arguments": '{"x": "' + ("y" * 392) + '"}'}}]},
+    ]
+    total = cm.estimate_messages_tokens(msgs)
+    assert total >= 200, f"expected >=200 tokens, got {total}"
+    print("\n✅ Token estimator counts content + tool_call arguments")
+
+
+def test_context_no_compress_below_budget():
+    """Test: maybe_compress is a no-op when prompt size is under threshold."""
+    print("\n" + "="*60)
+    print("TEST 32: no compression below budget")
+    print("="*60)
+    from src.context import ContextManager
+    cm = ContextManager(token_budget=10000, trigger_ratio=0.75)
+    msgs = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "thinking"},
+        {"role": "tool", "tool_call_id": "x", "content": "result"},
+    ]
+    state = _make_state(task="task")
+    out = cm.maybe_compress(msgs, state)
+    assert out is msgs, "should return the same list reference when not compressing"
+    print("\n✅ No compression below budget threshold")
+
+
+def test_context_compresses_above_budget():
+    """Test: maybe_compress reduces token count and inserts a summary marker."""
+    print("\n" + "="*60)
+    print("TEST 33: compression triggers above budget")
+    print("="*60)
+    from src.context import ContextManager, SUMMARY_MARKER
+
+    # Tiny budget so we trigger easily.
+    cm = ContextManager(token_budget=200, trigger_ratio=0.5, recent_turns=2)
+
+    # Build many turns with bulky content.
+    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "do the thing"}]
+    for i in range(8):
+        # Assistant message with a tool call
+        msgs.append({
+            "role": "assistant", "content": None,
+            "tool_calls": [{
+                "id": f"call_{i}", "type": "function",
+                "function": {"name": "execute_shell",
+                              "arguments": '{"command": "' + ("a" * 200) + '"}'},
+            }],
+        })
+        # Matching tool result
+        msgs.append({
+            "role": "tool", "tool_call_id": f"call_{i}",
+            "content": "tool output: " + ("b" * 200),
+        })
+
+    state = _make_state(
+        task="do the thing",
+        action_history=[
+            {"tool": "execute_shell", "params": {"command": f"cmd-{i}"}}
+            for i in range(8)
+        ],
+        observation_history=[f"output-{i}" for i in range(8)],
+    )
+
+    before = cm.estimate_messages_tokens(msgs)
+    out = cm.maybe_compress(msgs, state)
+    after = cm.estimate_messages_tokens(out)
+
+    assert out is not msgs, "should return a new list when compression fires"
+    assert after < before, f"compression should reduce tokens: before={before} after={after}"
+    # Summary message should be present.
+    summary_msgs = [m for m in out if SUMMARY_MARKER in (m.get("content") or "")]
+    assert len(summary_msgs) == 1, f"expected one summary message, got {len(summary_msgs)}"
+    # System message preserved.
+    assert out[0].get("role") == "system"
+    print(f"\n✅ Compression: {before} → {after} tokens; summary marker present")
+
+
+def test_context_preserves_tool_call_integrity():
+    """Test: compressor doesn't orphan tool messages from their assistant."""
+    print("\n" + "="*60)
+    print("TEST 34: tool-call integrity preserved after compression")
+    print("="*60)
+    from src.context import ContextManager
+    cm = ContextManager(token_budget=200, trigger_ratio=0.5, recent_turns=2)
+
+    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "task"}]
+    for i in range(5):
+        msgs.append({
+            "role": "assistant", "content": None,
+            "tool_calls": [{
+                "id": f"call_{i}", "type": "function",
+                "function": {"name": "x",
+                              "arguments": '{"k": "' + ("v" * 300) + '"}'},
+            }],
+        })
+        msgs.append({
+            "role": "tool", "tool_call_id": f"call_{i}",
+            "content": "obs " + ("o" * 300),
+        })
+
+    state = _make_state()
+    out = cm.maybe_compress(msgs, state)
+
+    # For every assistant message with tool_calls in the output, the matching
+    # tool result must appear before the next assistant message.
+    assert cm._is_tool_call_integrity_intact(out)
+    print("\n✅ Compressed messages keep every tool_call paired with its result")
+
+
+def test_context_arg_stubbing_for_old_writes():
+    """Test: huge `content` in old write_file tool_calls gets stubbed."""
+    print("\n" + "="*60)
+    print("TEST 35: argument stubbing on old assistant messages")
+    print("="*60)
+    import json as _json
+    from src.context import ContextManager
+    cm = ContextManager(token_budget=200, trigger_ratio=0.5, recent_turns=1)
+
+    big_content = "x" * 2000
+    msgs = [
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "task"},
+        {  # OLD assistant message with huge write_file
+            "role": "assistant", "content": None,
+            "tool_calls": [{
+                "id": "call_old", "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": _json.dumps({"path": "foo.py", "content": big_content}),
+                },
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call_old", "content": "wrote 2000 chars"},
+        # Recent assistant (within recent_turns=1)
+        {
+            "role": "assistant", "content": None,
+            "tool_calls": [{
+                "id": "call_new", "type": "function",
+                "function": {
+                    "name": "execute_shell",
+                    "arguments": '{"command": "ls"}',
+                },
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call_new", "content": "src/"},
+    ]
+
+    state = _make_state()
+    out = cm.maybe_compress(msgs, state)
+
+    # Find the recent assistant — its arguments should remain intact.
+    recent = [m for m in out if m.get("role") == "assistant"
+              and any(tc.get("id") == "call_new" for tc in (m.get("tool_calls") or []))]
+    assert recent, "recent assistant message should be preserved"
+    recent_args = recent[0]["tool_calls"][0]["function"]["arguments"]
+    assert "ls" in recent_args, "recent args should stay unstubbed"
+
+    # The old assistant's args should be stubbed (or the message dropped via summarization).
+    old_in_output = [m for m in out if m.get("role") == "assistant"
+                     and any(tc.get("id") == "call_old"
+                             for tc in (m.get("tool_calls") or []))]
+    if old_in_output:
+        old_args = _json.loads(
+            old_in_output[0]["tool_calls"][0]["function"]["arguments"])
+        # content field should be a stub, not the original 2000 chars
+        assert isinstance(old_args.get("content"), str)
+        assert "chars" in old_args["content"] and len(old_args["content"]) < 100, \
+            "old write_file content should be stubbed"
+    print("\n✅ Old write_file args stubbed; recent args preserved verbatim")
+
+
+def test_context_step_boundary_compaction():
+    """Test: compact_step_boundary collapses a finished step's messages to one summary line."""
+    print("\n" + "="*60)
+    print("TEST 36: step-boundary compaction")
+    print("="*60)
+    from src.context import ContextManager
+    cm = ContextManager(token_budget=10000)
+
+    msgs = [
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "Task: build something"},
+        # Step 2 scope marker (the executor uses this exact prefix)
+        {"role": "user", "content": "Now do Step 2: write the foo module\nSuccess criterion: foo.py exists"},
+        # Some iterations within step 2
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "write_file",
+                                       "arguments": '{"path":"foo.py","content":"..."}'}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "wrote 5 chars"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "c2", "type": "function",
+                         "function": {"name": "complete_task",
+                                       "arguments": '{"answer":"created foo.py"}'}}]},
+        {"role": "tool", "tool_call_id": "c2", "content": "(step terminated)"},
+    ]
+
+    step = {"id": 2, "description": "write the foo module",
+            "success_criterion": "foo.py exists"}
+    out = cm.compact_step_boundary(msgs, _make_state(), step, "created foo.py")
+
+    # Step messages collapsed to a single user summary.
+    assert len(out) == 3, f"expected 3 messages after compaction, got {len(out)}"
+    assert out[0]["role"] == "system"
+    assert out[1]["content"].startswith("Task:")
+    assert out[2]["role"] == "user"
+    assert "[Step 2 complete]" in out[2]["content"]
+    assert "created foo.py" in out[2]["content"]
+    print("\n✅ Step-boundary compaction collapses iteration history to one summary")
+
+
+def test_context_disabled_returns_input_unchanged():
+    """Test: AGENT_CONTEXT_COMPRESSION_ENABLED=false yields a no-op manager."""
+    print("\n" + "="*60)
+    print("TEST 37: context manager disabled via env")
+    print("="*60)
+    import os
+    from src.context import make_context_manager
+    os.environ["AGENT_CONTEXT_COMPRESSION_ENABLED"] = "false"
+    try:
+        cm = make_context_manager()
+        assert cm is None, f"expected None when disabled, got {cm}"
+    finally:
+        os.environ.pop("AGENT_CONTEXT_COMPRESSION_ENABLED", None)
+    print("\n✅ Disabled context manager returns None")
+
+
+def test_read_file_modes():
+    """Test: read_file head/tail/slice modes return the right slice + pagination hint."""
+    print("\n" + "="*60)
+    print("TEST 38: read_file head/tail/slice modes")
+    print("="*60)
+    import tempfile
+    from src.tools import Tools
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd()
+        os.chdir(td)
+        try:
+            content = "".join(f"line{i:03d}\n" for i in range(500))  # 500 lines
+            with open("big.txt", "w") as f:
+                f.write(content)
+
+            # head mode
+            r1 = Tools.read_file("big.txt", mode="head", length=100)
+            assert r1.success
+            assert r1.output.startswith("line000")
+            assert "Use mode='slice'" in r1.output  # pagination hint
+
+            # tail mode
+            r2 = Tools.read_file("big.txt", mode="tail", length=100)
+            assert r2.success
+            # Last bit should contain end-of-file lines
+            assert "line499" in r2.output
+
+            # slice mode
+            r3 = Tools.read_file("big.txt", mode="slice", offset=100, length=100)
+            assert r3.success
+            assert "Use mode='slice'" in r3.output
+
+            # invalid mode
+            r4 = Tools.read_file("big.txt", mode="bogus")
+            assert not r4.success and "mode" in r4.error.lower()
+        finally:
+            os.chdir(old)
+    print("\n✅ read_file head/tail/slice all behave correctly")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "="*60)
@@ -711,6 +1006,16 @@ def run_all_tests():
     test_executor_dispatches_all_schema_tools()
     test_initial_messages_includes_complete_task_instruction()
     test_xml_tool_call_fallback_parser()
+
+    # Context management.
+    test_context_token_estimator()
+    test_context_no_compress_below_budget()
+    test_context_compresses_above_budget()
+    test_context_preserves_tool_call_integrity()
+    test_context_arg_stubbing_for_old_writes()
+    test_context_step_boundary_compaction()
+    test_context_disabled_returns_input_unchanged()
+    test_read_file_modes()
 
     input("\nPress Enter to run API-backed tests (or Ctrl+C to stop here)...")
 

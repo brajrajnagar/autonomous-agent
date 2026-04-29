@@ -22,6 +22,7 @@ _project_root = os.path.dirname(_script_dir)
 load_dotenv(os.path.join(_project_root, "config", ".env"))
 
 from colors import C
+from context import make_context_manager
 from critic import Critic, is_approved
 from executor import Executor
 from feedback import make_feedback_engine
@@ -71,6 +72,10 @@ class AutonomousAgent:
         # Feedback engine: post-tool deterministic verifiers (None when disabled).
         self.feedback = make_feedback_engine(logger=self.logger)
 
+        # Context manager: compresses old messages into a running summary
+        # before each LLM call (None when disabled).
+        self.context = make_context_manager(logger=self.logger)
+
         self.tools = Tools()
         self.planner = Planner(
             client=self.client, model=self.model,
@@ -84,6 +89,7 @@ class AutonomousAgent:
             client=self.client, model=self.model, tools=self.tools,
             max_iterations=self.max_iterations, max_tokens_tao=max_tokens_tao,
             logger=self.logger, feedback=self.feedback,
+            context_manager=self.context,
         )
         self.critic = Critic(
             client=self.client, model=self.model, max_tokens=max_tokens_critic,

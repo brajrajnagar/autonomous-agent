@@ -40,7 +40,8 @@ class Executor:
     def __init__(self, client, model: str, tools: Tools,
                  max_iterations: int, max_tokens_tao: int,
                  logger: Optional[Any] = None,
-                 feedback: Optional[Any] = None):
+                 feedback: Optional[Any] = None,
+                 context_manager: Optional[Any] = None):
         self.client = client
         self.model = model
         self.tools = tools
@@ -48,6 +49,7 @@ class Executor:
         self.max_tokens_tao = max_tokens_tao
         self.logger = logger
         self.feedback = feedback
+        self.context = context_manager
         # Multi-turn message accumulator. Reset by execute_plan/legacy_execute
         # at the start of each top-level invocation; mutated by run_tao_loop.
         self._messages: List[Dict[str, Any]] = []
@@ -93,6 +95,13 @@ class Executor:
                     "iterations_used": state.iteration_count,
                     "completed": state.is_complete,
                 })
+            # Step-boundary compaction: replace the just-completed step's
+            # iteration history with a one-line summary before the next
+            # step begins. Free, deterministic, no LLM call.
+            if self.context:
+                self._messages = self.context.compact_step_boundary(
+                    self._messages, state, step, step_result,
+                )
         state.current_step = None
         return "\n\n".join(step_results)
 
@@ -132,6 +141,11 @@ class Executor:
                 self.logger.log("iteration", {
                     "step_id": step_id, "iteration": state.iteration_count,
                 })
+
+            # Context compression: keeps the prompt small without dropping
+            # essential anchors. Returns the input unchanged when below budget.
+            if self.context:
+                self._messages = self.context.maybe_compress(self._messages, state)
 
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -335,7 +349,12 @@ class Executor:
         if tool_name == "execute_shell":
             return self.tools.execute_shell(parameters.get("command", ""))
         if tool_name == "read_file":
-            return self.tools.read_file(parameters.get("path", ""))
+            return self.tools.read_file(
+                parameters.get("path", ""),
+                mode=parameters.get("mode", "head"),
+                offset=int(parameters.get("offset", 0)),
+                length=int(parameters.get("length", 6000)),
+            )
         if tool_name == "write_file":
             return self.tools.write_file(
                 parameters.get("path", ""),
