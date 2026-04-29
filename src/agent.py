@@ -126,6 +126,8 @@ class AutonomousAgent:
 
             try:
                 if mode == "simple":
+                    # Reset message accumulator so a fresh task doesn't reuse stale context.
+                    self.executor._messages = []
                     result = self.executor.run_tao_loop(self.state, self.max_iterations)
                 elif mode == "standard":
                     plan = self.planner.initial_plan(task)

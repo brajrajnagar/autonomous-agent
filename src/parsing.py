@@ -6,7 +6,8 @@ multiple strategies to recover a usable dict from the raw text.
 
 import hashlib
 import json
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 
 
 def parse_response(response: str) -> Dict[str, Any]:
@@ -96,3 +97,42 @@ def hash_action(tool_name: str, parameters: Dict[str, Any]) -> str:
     """Stable hash of a tool call (for repeated-action loop detection)."""
     action_str = f"{tool_name}:{str(sorted(parameters.items()))}"
     return hashlib.md5(action_str.encode()).hexdigest()
+
+
+# Qwen-style tool calls emitted as XML inside `content` when the provider
+# doesn't translate them to OpenAI's structured `tool_calls` field. Format:
+#   <tool_call>
+#   <function=NAME>
+#   <parameter=KEY>VALUE</parameter>
+#   ...
+#   </function>
+#   </tool_call>
+_QWEN_TOOL_CALL = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+_QWEN_FUNCTION = re.compile(r"<function=([^>\s]+)\s*>(.*?)</function>", re.DOTALL)
+_QWEN_PARAMETER = re.compile(r"<parameter=([^>\s]+)\s*>(.*?)</parameter>", re.DOTALL)
+
+
+def parse_xml_tool_calls(text: str) -> List[Dict[str, Any]]:
+    """Parse Qwen-style `<tool_call>...<function=NAME>...</function></tool_call>` blocks.
+
+    Returns a list of `{"name": str, "arguments": dict}` for each tool call
+    found, or an empty list when none are present. Used as a fallback when
+    a provider accepts the OpenAI `tools=...` parameter but emits its
+    tool calls as text inside `content` (e.g. Qwen3.5 via Clarifai).
+    """
+    if not text:
+        return []
+    out: List[Dict[str, Any]] = []
+    for tc_match in _QWEN_TOOL_CALL.finditer(text):
+        body = tc_match.group(1)
+        fn_match = _QWEN_FUNCTION.search(body)
+        if not fn_match:
+            continue
+        name = fn_match.group(1).strip()
+        params: Dict[str, Any] = {}
+        for p_match in _QWEN_PARAMETER.finditer(fn_match.group(2)):
+            key = p_match.group(1).strip()
+            value = p_match.group(2).strip()
+            params[key] = value
+        out.append({"name": name, "arguments": params})
+    return out

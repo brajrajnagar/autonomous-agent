@@ -556,6 +556,119 @@ def test_autonomy_env_var_validation():
     print("\n✅ AGENT_AUTONOMY accepts valid modes, defaults/falls back to 'auto'")
 
 
+def test_tool_schemas_well_formed():
+    """Test: every TOOL_DEFINITIONS entry has the OpenAI function-calling shape."""
+    print("\n" + "="*60)
+    print("TEST 26: tool schemas — all entries well-formed")
+    print("="*60)
+    from src.tool_schemas import TOOL_DEFINITIONS
+    assert len(TOOL_DEFINITIONS) >= 10, f"expected 10+ tools, got {len(TOOL_DEFINITIONS)}"
+    for entry in TOOL_DEFINITIONS:
+        assert entry.get("type") == "function"
+        fn = entry.get("function", {})
+        assert "name" in fn and isinstance(fn["name"], str) and fn["name"]
+        assert "description" in fn and len(fn["description"]) > 10
+        params = fn.get("parameters", {})
+        assert params.get("type") == "object"
+        assert "properties" in params and isinstance(params["properties"], dict)
+        # Every property must declare its type.
+        for prop_name, prop_schema in params["properties"].items():
+            assert "type" in prop_schema, f"{fn['name']}.{prop_name} missing type"
+    print(f"\n✅ {len(TOOL_DEFINITIONS)} tool schemas all well-formed")
+
+
+def test_complete_task_schema_present():
+    """Test: synthetic complete_task tool exists with `answer` parameter."""
+    print("\n" + "="*60)
+    print("TEST 27: complete_task tool present")
+    print("="*60)
+    from src.tool_schemas import TOOL_DEFINITIONS, TOOL_NAMES
+    assert "complete_task" in TOOL_NAMES
+    ct = next(t for t in TOOL_DEFINITIONS if t["function"]["name"] == "complete_task")
+    params = ct["function"]["parameters"]
+    assert "answer" in params["properties"]
+    assert "answer" in params.get("required", [])
+    assert params["properties"]["answer"]["type"] == "string"
+    print("\n✅ complete_task schema requires a string `answer`")
+
+
+def test_executor_dispatches_all_schema_tools():
+    """Test: every non-synthetic tool in TOOL_DEFINITIONS is routed by Executor._execute_tool."""
+    print("\n" + "="*60)
+    print("TEST 28: Executor dispatch covers all schema tools")
+    print("="*60)
+    from src.tool_schemas import TOOL_NAMES
+    from src.executor import Executor
+    import inspect
+
+    # Read the source of _execute_tool and check each tool name appears.
+    source = inspect.getsource(Executor._execute_tool)
+    expected = TOOL_NAMES - {"complete_task"}  # complete_task is handled in run_tao_loop
+    missing = [n for n in expected if f'"{n}"' not in source]
+    assert not missing, f"_execute_tool missing dispatch for: {missing}"
+    print(f"\n✅ All {len(expected)} non-synthetic tools have a dispatch branch")
+
+
+def test_initial_messages_includes_complete_task_instruction():
+    """Test: initial system message tells the model to call complete_task to terminate."""
+    print("\n" + "="*60)
+    print("TEST 29: initial messages mention complete_task")
+    print("="*60)
+    # Construct an Executor with throwaway args; we're only calling _initial_messages.
+    from src.executor import Executor
+    # Skip full agent init — Executor only needs the args for execution paths,
+    # not for _initial_messages which is pure-text.
+    e = Executor(client=None, model="x", tools=None,
+                 max_iterations=1, max_tokens_tao=1)
+    msgs = e._initial_messages("write a haiku")
+    assert len(msgs) == 2
+    assert msgs[0]["role"] == "system"
+    assert "complete_task" in msgs[0]["content"]
+    assert "tools" in msgs[0]["content"].lower()
+    assert msgs[1]["role"] == "user"
+    assert "haiku" in msgs[1]["content"]
+    print("\n✅ Initial messages have system + user shape and mention complete_task")
+
+
+def test_xml_tool_call_fallback_parser():
+    """Test: parse_xml_tool_calls extracts Qwen-style <tool_call> blocks."""
+    print("\n" + "="*60)
+    print("TEST 30: XML tool-call fallback parser")
+    print("="*60)
+    from src.parsing import parse_xml_tool_calls
+
+    # Realistic Qwen3.5 output.
+    text = """<tool_call>
+<function=list_directory>
+<parameter=path>
+src
+</parameter>
+</function>
+</tool_call>"""
+    calls = parse_xml_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "list_directory"
+    assert calls[0]["arguments"] == {"path": "src"}
+
+    # Multi-arg case.
+    text2 = """<tool_call>
+<function=write_file>
+<parameter=path>foo.py</parameter>
+<parameter=content>print('hi')</parameter>
+</function>
+</tool_call>"""
+    calls2 = parse_xml_tool_calls(text2)
+    assert len(calls2) == 1
+    assert calls2[0]["name"] == "write_file"
+    assert calls2[0]["arguments"]["path"] == "foo.py"
+    assert "print" in calls2[0]["arguments"]["content"]
+
+    # No tool calls — empty list.
+    assert parse_xml_tool_calls("Just thinking out loud.") == []
+    assert parse_xml_tool_calls("") == []
+    print("\n✅ XML tool-call fallback parser handles single, multi-arg, and empty cases")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "="*60)
@@ -591,6 +704,13 @@ def run_all_tests():
     test_planner_prompt_warns_against_unrequested_files()
     test_triage_prompt_lists_three_buckets()
     test_autonomy_env_var_validation()
+
+    # Structured tool calling.
+    test_tool_schemas_well_formed()
+    test_complete_task_schema_present()
+    test_executor_dispatches_all_schema_tools()
+    test_initial_messages_includes_complete_task_instruction()
+    test_xml_tool_call_fallback_parser()
 
     input("\nPress Enter to run API-backed tests (or Ctrl+C to stop here)...")
 
