@@ -48,6 +48,14 @@ class AutonomousAgent:
         self.planning_enabled = os.getenv("AGENT_PLANNING_ENABLED", "true").lower() == "true"
         max_plan_refinements = int(os.getenv("AGENT_MAX_PLAN_REFINEMENTS", "5"))
 
+        # Autonomy mode selects how much ceremony each task gets:
+        #   auto         → triage classifies (simple → no plan; standard → silent plan; complex → full review)
+        #   interactive  → always full plan + critique + user review (current legacy)
+        #   silent       → always plan, never prompt the user for review
+        self.autonomy = os.getenv("AGENT_AUTONOMY", "auto").lower().strip()
+        if self.autonomy not in ("auto", "interactive", "silent"):
+            self.autonomy = "auto"
+
         # Per-loop max_tokens budgets.
         max_tokens_tao = int(os.getenv("AGENT_MAX_TOKENS_TAO", "15000"))
         max_tokens_critic = int(os.getenv("AGENT_MAX_TOKENS_CRITIC", "5000"))
@@ -85,21 +93,54 @@ class AutonomousAgent:
         self.state = AgentState()
 
     def run(self, task: str) -> str:
-        """Run the agent end-to-end: plan → execute → critic."""
+        """Run the agent end-to-end: triage → execute → critic.
+
+        Behavior depends on `self.autonomy`:
+          - "auto" (default): triage classifies the task. Simple tasks skip
+            planning entirely; standard tasks get a silent plan; complex
+            tasks get full plan + critique + user review.
+          - "interactive": forces complex path (always show plan + critique).
+          - "silent": forces standard path (plan + execute, no user prompt).
+        """
         self.state = AgentState(task=task)
         self.logger.start(task)
 
-        if self.planning_enabled:
+        if not self.planning_enabled:
+            result = self.executor.legacy_execute(self.state, task)
+        else:
+            # Decide mode (skip the triage LLM call when overridden).
+            if self.autonomy == "interactive":
+                mode = "complex"
+            elif self.autonomy == "silent":
+                mode = "standard"
+            else:
+                mode = self.planner.triage(task)
+
             print(C.phase("\n🤖 Starting agent for task:") + f" {task}")
+            mode_summary = {
+                "simple":   "skipping plan, executing directly",
+                "standard": "auto-approved plan, no review needed",
+                "complex":  "full plan + critique + user review",
+            }.get(mode, mode)
+            print(C.dim(f"   autonomy={self.autonomy}, complexity={mode} → {mode_summary}\n"))
+
             try:
-                plan = self.planner.plan_refinement_loop(task)
+                if mode == "simple":
+                    result = self.executor.run_tao_loop(self.state, self.max_iterations)
+                elif mode == "standard":
+                    plan = self.planner.initial_plan(task)
+                    self._print_plan_summary(plan)
+                    self.logger.log("plan_approved", {
+                        "plan": plan, "refinement_rounds": 0, "mode": "standard",
+                    })
+                    result = self.executor.execute_plan(self.state, task, plan)
+                else:  # complex
+                    plan = self.planner.plan_refinement_loop(task)
+                    result = self.executor.execute_plan(self.state, task, plan)
             except KeyboardInterrupt as e:
                 msg = f"Cancelled at plan refinement: {e}"
                 self.logger.end(msg, "CANCELLED")
                 return msg
-            result = self.executor.execute_plan(self.state, task, plan)
-        else:
-            result = self.executor.legacy_execute(self.state, task)
 
         print(C.phase("\n--- CRITIC REVIEW ---"))
         critic_feedback = self.critic.review(task, result, self.state.action_history)
@@ -116,6 +157,16 @@ class AutonomousAgent:
             print(C.dim(f"\n📝 Session report: {report_path}"))
 
         return result
+
+    def _print_plan_summary(self, plan):
+        """Print the plan compactly without prompting (used by 'standard' mode)."""
+        print(C.phase("\n📋 Plan (auto-approved):"))
+        summary = plan.get("summary", "")
+        if summary:
+            print(f"{C.BOLD}Summary:{C.RESET} {summary}")
+        for step in plan.get("steps", []):
+            print(f"  {C.step(str(step['id']) + '.')} {step['description']}")
+        print()
 
 
 # Re-export for backward compatibility with `from agent import AutonomousAgent`.

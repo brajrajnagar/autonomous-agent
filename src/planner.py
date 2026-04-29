@@ -7,7 +7,7 @@ from colors import C
 from parsing import safe_json_parse
 from prompts import (
     INITIAL_PLAN_PROMPT, PLAN_CRITIQUE_PROMPT, PLAN_REFINE_PROMPT,
-    system_prefix,
+    TRIAGE_PROMPT, system_prefix,
 )
 
 
@@ -46,6 +46,44 @@ class Planner:
             max_tokens=max_tokens,
         )
         return (response.choices[0].message.content or "").strip()
+
+    def triage(self, task: str) -> str:
+        """Classify task complexity. Returns 'simple' | 'standard' | 'complex'.
+
+        Cheap LLM call (~150 tokens). On any parse / value failure, defaults
+        to 'standard' so the agent still does *some* planning rather than
+        nothing. Logs the classification + reasoning for later analysis.
+        """
+        prompt = TRIAGE_PROMPT.format(task=task)
+        # Note: 2000 tokens (not the cheaper ~200 you'd expect) because
+        # reasoning models (e.g. Qwen3.5) consume the budget on internal
+        # chain-of-thought before emitting the visible JSON. Setting this
+        # too low produces an empty `content` and finish_reason='length'.
+        raw = self._llm_call(
+            "You are a task complexity classifier. Output strict JSON only.",
+            prompt, temperature=0.1, max_tokens=2000,
+        )
+        parsed = safe_json_parse(raw)
+        VALID = ("simple", "standard", "complex")
+
+        if not parsed or "complexity" not in parsed:
+            if self.logger:
+                self.logger.log("triage", {
+                    "complexity": "standard", "fallback": True,
+                    "raw_preview": raw[:200],
+                })
+            return "standard"
+
+        complexity = str(parsed.get("complexity", "")).lower().strip()
+        if complexity not in VALID:
+            complexity = "standard"
+
+        if self.logger:
+            self.logger.log("triage", {
+                "complexity": complexity,
+                "reasoning": parsed.get("reasoning", ""),
+            })
+        return complexity
 
     def initial_plan(self, task: str) -> Dict[str, Any]:
         prompt = INITIAL_PLAN_PROMPT.format(task=task)

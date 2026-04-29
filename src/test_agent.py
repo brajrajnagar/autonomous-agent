@@ -504,6 +504,58 @@ def test_browser_blocked_content_detection():
     print("\n✅ Blocked-content detection works on JS shells, 403s, and captchas; ignores long articles")
 
 
+def test_planner_prompt_warns_against_unrequested_files():
+    """Test: INITIAL_PLAN_PROMPT tells the planner not to write files unless asked."""
+    print("\n" + "="*60)
+    print("TEST 23: planner prompt — no unrequested files")
+    print("="*60)
+    from src.prompts import INITIAL_PLAN_PROMPT
+    formatted = INITIAL_PLAN_PROMPT.format(task="anything")
+    lower = formatted.lower()
+    assert "do not" in lower and "file" in lower, "missing 'do not' / 'file' guidance"
+    assert "explicit" in lower or "unless" in lower, \
+        "should condition file-writing on explicit user request"
+    print("\n✅ Plan prompt warns against writing files for Q&A tasks")
+
+
+def test_triage_prompt_lists_three_buckets():
+    """Test: TRIAGE_PROMPT defines simple/standard/complex with examples."""
+    print("\n" + "="*60)
+    print("TEST 24: triage prompt — 3 buckets defined")
+    print("="*60)
+    from src.prompts import TRIAGE_PROMPT
+    formatted = TRIAGE_PROMPT.format(task="x")
+    for label in ("simple", "standard", "complex"):
+        assert label in formatted, f"TRIAGE_PROMPT missing bucket: {label}"
+    assert "Examples:" in formatted, "buckets should have examples"
+    print("\n✅ Triage prompt defines all three buckets with examples")
+
+
+def test_autonomy_env_var_validation():
+    """Test: AGENT_AUTONOMY accepts auto/interactive/silent, falls back to auto."""
+    print("\n" + "="*60)
+    print("TEST 25: AGENT_AUTONOMY env var validation")
+    print("="*60)
+    for valid in ("auto", "interactive", "silent"):
+        os.environ["AGENT_AUTONOMY"] = valid
+        try:
+            a = AutonomousAgent()
+            assert a.autonomy == valid, f"expected {valid}, got {a.autonomy}"
+        finally:
+            os.environ.pop("AGENT_AUTONOMY", None)
+    # Garbage falls back to "auto".
+    os.environ["AGENT_AUTONOMY"] = "garbage"
+    try:
+        a = AutonomousAgent()
+        assert a.autonomy == "auto", f"garbage should fall back to auto, got {a.autonomy}"
+    finally:
+        os.environ.pop("AGENT_AUTONOMY", None)
+    # Default is "auto".
+    a = AutonomousAgent()
+    assert a.autonomy == "auto"
+    print("\n✅ AGENT_AUTONOMY accepts valid modes, defaults/falls back to 'auto'")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "="*60)
@@ -534,6 +586,11 @@ def run_all_tests():
     test_system_prefix_contains_today()
     test_planner_prompt_lists_browser_tools()
     test_browser_blocked_content_detection()
+
+    # Triage / autonomy tests.
+    test_planner_prompt_warns_against_unrequested_files()
+    test_triage_prompt_lists_three_buckets()
+    test_autonomy_env_var_validation()
 
     input("\nPress Enter to run API-backed tests (or Ctrl+C to stop here)...")
 

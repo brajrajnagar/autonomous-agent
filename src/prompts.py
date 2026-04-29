@@ -71,9 +71,26 @@ Rules of thumb:
 - For "latest" / "current" / "news" tasks → web_search first, then browser_visit on the most relevant URL. Do not invent URLs; only visit URLs returned by web_search or supplied by the user.
 - For research tasks, cap source visits to 5–7 and require citations.
 - Do not say "browsing is not permitted" — these tools exist; use them.
+- For Q&A or research tasks, the final answer should be returned in the agent's response. Do NOT add a step to write the answer to a file unless the user explicitly asked (e.g., "write a report to X.md", "save this to a file", "create a report"). When uncertain, default to no file.
 
 Respond with strict JSON only (no prose, no markdown fences):
 {{"summary": "...", "steps": [{{"id": 1, "description": "...", "success_criterion": "..."}}, ...]}}
+
+USER REQUEST: {task}"""
+
+
+TRIAGE_PROMPT = """Classify the user's task by complexity. Respond with strict JSON only:
+{{"complexity": "simple" | "standard" | "complex", "reasoning": "one short sentence"}}
+
+Definitions:
+- simple: A single question, lookup, or one-shot action. The agent has the tools to answer directly with at most a handful of tool calls. No multi-step plan needed.
+  Examples: "what is X?", "list files in Y", "find all uses of Foo in src/", "what's the latest news on A", "read foo.py and explain what it does", "search for 'pattern' in the codebase"
+- standard: Multi-step but routine work — clear scope, no user judgment needed. The agent can act without checkpoints.
+  Examples: "rename function X to Y everywhere", "add docstrings to all public functions in src/", "delete all .tmp files", "format these files with ruff", "add error handling to the data loader"
+- complex: Open-ended scope, ambiguous, or large enough that user feedback shapes the outcome.
+  Examples: "build a neural network from scratch", "design an authentication system", "refactor the data pipeline", "add a new feature for X", "design and implement Y"
+
+When in doubt, prefer "simple" over "standard" or "standard" over "complex" — speed matters, and the user can override with AGENT_AUTONOMY=interactive if they want full plan review.
 
 USER REQUEST: {task}"""
 
