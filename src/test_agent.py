@@ -1264,6 +1264,119 @@ def test_search_web_output_shows_rewrite_when_changed():
     print("\n✅ search_web sends the rewritten query + annotates the output")
 
 
+def test_ui_renderers_do_not_raise():
+    """Test: ui module imports and key renderers run without errors."""
+    print("\n" + "="*60)
+    print("TEST 50: ui — render functions and spinner don't raise")
+    print("="*60)
+    import time
+    from src import ui
+
+    ui.render_plan(
+        {"summary": "test", "steps": [
+            {"id": 1, "description": "do X", "success_criterion": "X done"},
+            {"id": 2, "description": "do Y", "success_criterion": "Y done"},
+        ]},
+        suggestions=[{"issue": "missing tests", "fix": "add tests"}],
+    )
+    ui.render_step_header({"id": 1, "description": "do X", "success_criterion": "X done"}, 1, 2)
+    with ui.thinking("Test spinner", show_elapsed=True):
+        time.sleep(0.05)
+    ui.render_dashboard({
+        "task": "test task", "approved": True, "duration_s": 12.3,
+        "steps_total": 2, "steps_completed": 2, "replans": 0,
+        "tool_counts": {"read_file": 1}, "log_path": "logs/x.jsonl",
+    })
+    # Empty / missing fields path.
+    ui.render_dashboard({})
+    ui.render_plan({})  # empty plan shouldn't raise
+    print("\n✅ ui renderers and spinner all run without exceptions")
+
+
+def test_ui_choose_non_tty_fallback():
+    """Test: ui.choose falls back to numbered prompt when stdin isn't a TTY."""
+    print("\n" + "="*60)
+    print("TEST 51: ui.choose — non-TTY numbered fallback")
+    print("="*60)
+    import io
+    from src import ui
+
+    choices = [("First option", "a"), ("Second option", "b"), ("Third option", "c")]
+
+    # Simulate piped stdin: replace sys.stdin and force _interactive_capable to False.
+    old_stdin = sys.stdin
+    old_capable = ui._interactive_capable
+    ui._interactive_capable = lambda: False
+    try:
+        # User types "2" → second option selected.
+        sys.stdin = io.StringIO("2\n")
+        result = ui.choose("Pick one:", choices)
+        assert result == "b", f"expected 'b', got {result!r}"
+
+        # User types empty → default returned.
+        sys.stdin = io.StringIO("\n")
+        result = ui.choose("Pick one:", choices, default="c")
+        assert result == "c"
+
+        # User types empty + no default → first option.
+        sys.stdin = io.StringIO("\n")
+        result = ui.choose("Pick one:", choices)
+        assert result == "a"
+
+        # Garbage input → default.
+        sys.stdin = io.StringIO("not-a-number\n")
+        result = ui.choose("Pick one:", choices, default="b")
+        assert result == "b"
+
+        # Out-of-range index → default.
+        sys.stdin = io.StringIO("99\n")
+        result = ui.choose("Pick one:", choices, default="c")
+        assert result == "c"
+    finally:
+        sys.stdin = old_stdin
+        ui._interactive_capable = old_capable
+    print("\n✅ choose: numbered fallback handles valid, empty, garbage, OOB inputs")
+
+
+def test_ui_checkbox_non_tty_fallback():
+    """Test: ui.checkbox falls back to comma-separated input when not TTY."""
+    print("\n" + "="*60)
+    print("TEST 52: ui.checkbox — non-TTY comma-separated fallback")
+    print("="*60)
+    import io
+    from src import ui
+
+    choices = [("Apply A", "a"), ("Apply B", "b"), ("Apply C", "c")]
+
+    old_stdin = sys.stdin
+    old_capable = ui._interactive_capable
+    ui._interactive_capable = lambda: False
+    try:
+        # "1,3" → first and third selected.
+        sys.stdin = io.StringIO("1,3\n")
+        assert ui.checkbox("Pick:", choices) == ["a", "c"]
+
+        # "2" alone → only second.
+        sys.stdin = io.StringIO("2\n")
+        assert ui.checkbox("Pick:", choices) == ["b"]
+
+        # Empty → no selection.
+        sys.stdin = io.StringIO("\n")
+        assert ui.checkbox("Pick:", choices) == []
+
+        # Mixed valid + garbage → only valid kept.
+        sys.stdin = io.StringIO("1, banana, 3\n")
+        assert ui.checkbox("Pick:", choices) == ["a", "c"]
+
+        # Out-of-range silently skipped.
+        sys.stdin = io.StringIO("99,2\n")
+        assert ui.checkbox("Pick:", choices) == ["b"]
+    finally:
+        sys.stdin = old_stdin
+        ui._interactive_capable = old_capable
+    print("\n✅ checkbox: comma-separated fallback handles all input shapes correctly")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "="*60)
@@ -1331,6 +1444,11 @@ def run_all_tests():
     test_rewrite_query_caches_result()
     test_rewrite_query_falls_back_on_no_api_key()
     test_search_web_output_shows_rewrite_when_changed()
+
+    # Terminal UI.
+    test_ui_renderers_do_not_raise()
+    test_ui_choose_non_tty_fallback()
+    test_ui_checkbox_non_tty_fallback()
 
     input("\nPress Enter to run API-backed tests (or Ctrl+C to stop here)...")
 

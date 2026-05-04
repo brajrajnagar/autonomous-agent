@@ -3,6 +3,7 @@
 import json
 from typing import Any, Dict, List, Optional
 
+import ui
 from colors import C
 from parsing import safe_json_parse
 from prompts import (
@@ -34,17 +35,19 @@ class Planner:
     # ---- LLM calls -----------------------------------------------------------
 
     def _llm_call(self, system_msg: str, user_msg: str,
-                  temperature: float, max_tokens: int) -> str:
+                  temperature: float, max_tokens: int,
+                  label: str = "Thinking") -> str:
         """Single-shot LLM call returning the raw text response."""
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prefix() + system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        with ui.thinking(label):
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prefix() + system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         return (response.choices[0].message.content or "").strip()
 
     def triage(self, task: str) -> str:
@@ -62,6 +65,7 @@ class Planner:
         raw = self._llm_call(
             "You are a task complexity classifier. Output strict JSON only.",
             prompt, temperature=0.1, max_tokens=2000,
+            label="Triaging task complexity",
         )
         parsed = safe_json_parse(raw)
         VALID = ("simple", "standard", "complex")
@@ -90,6 +94,7 @@ class Planner:
         raw = self._llm_call(
             "You are a senior planning agent. Output strict JSON only.",
             prompt, temperature=0.5, max_tokens=self.max_tokens_initial,
+            label="Generating plan",
         )
         parsed = safe_json_parse(raw)
         if not parsed or "steps" not in parsed or not parsed["steps"]:
@@ -105,6 +110,7 @@ class Planner:
         raw = self._llm_call(
             "You are a critical planning reviewer. Output strict JSON only.",
             prompt, temperature=0.3, max_tokens=self.max_tokens_critique,
+            label="Reviewing plan",
         )
         parsed = safe_json_parse(raw)
         if not parsed or "suggestions" not in parsed:
@@ -136,6 +142,7 @@ class Planner:
         raw = self._llm_call(
             "You are a recovery planner. Output strict JSON only.",
             prompt, temperature=0.4, max_tokens=2000,
+            label="Replanning after failure",
         )
         parsed = safe_json_parse(raw)
         VALID = ("retry", "revise_step", "revise_plan", "skip", "abort")
@@ -189,6 +196,7 @@ class Planner:
         raw = self._llm_call(
             "You are a planning agent revising a plan. Output strict JSON only.",
             prompt, temperature=0.4, max_tokens=self.max_tokens_refine,
+            label="Refining plan",
         )
         parsed = safe_json_parse(raw)
         if not parsed or "steps" not in parsed or not parsed["steps"]:
@@ -200,44 +208,80 @@ class Planner:
 
     def present_plan_to_user(self, plan: Dict[str, Any],
                              suggestions: List[Dict[str, str]]) -> str:
-        """Print the plan + suggestions and read one line from stdin.
+        """Render the plan and let the user pick what to do.
 
-        Returns the literal "APPROVE" sentinel for empty/`go`/`ok`/`yes`,
-        a normalized "Apply suggestion(s) ..." string for `apply N`, or
-        the raw user input otherwise.
+        Returns one of:
+        - "APPROVE" sentinel               → the plan was accepted as-is
+        - "Apply suggestion(s) i,j..."     → checkbox selection of suggestions
+        - free-form text                   → user wants the planner to revise
+
+        Two prompt shapes:
+        - With suggestions: a single CHECKBOX so multi-select is the
+          primary action. Suggestions list first; "Describe my own
+          changes" and "Cancel" are also there as toggleable special
+          options. Empty selection = approve.
+        - Without suggestions: a single SELECT with Approve/Describe/Cancel.
+
+        On non-TTY (piped/captured input) the picker degrades to a
+        numbered prompt so automation keeps working.
         """
-        print("\n" + C.header("═" * 60))
-        print(C.header("📋 PROPOSED PLAN"))
-        print(C.header("═" * 60))
-        print(f"{C.BOLD}Summary:{C.RESET} {plan.get('summary', '')}\n")
-        print(f"{C.BOLD}Steps:{C.RESET}")
-        for step in plan.get("steps", []):
-            print(f"  {C.step(str(step['id']) + '.')} {step['description']}")
-            crit = step.get("success_criterion", "")
-            if crit:
-                print(C.dim(f"     ↳ success: {crit}"))
-        if suggestions:
-            print(C.hint("\n💡 Suggested improvements:"))
-            for i, sug in enumerate(suggestions, 1):
-                print(f"  {C.hint(f'[{i}]')} {sug.get('issue', '')}")
-                print(f"      {C.dim('→')} {sug.get('fix', '')}")
-        else:
-            print(C.ok("\n💡 No suggestions — plan looks solid."))
-        print(C.dim(
-            "\nType 'go' / 'ok' / Enter to approve and execute,\n"
-            "     'apply 1' or 'apply 1,2' to adopt suggestions,\n"
-            "     or describe changes in your own words."
-        ))
+        ui.render_plan(plan, suggestions)
+
+        # No suggestions → simple single-select.
+        if not suggestions:
+            print(C.ok("💡 No suggestions — plan looks solid."))
+            try:
+                action = ui.choose("What would you like to do?", [
+                    ("Approve plan as-is and execute", "APPROVE"),
+                    ("Describe changes in my own words...", "FREEFORM"),
+                    ("Cancel run", "CANCEL"),
+                ], default="APPROVE")
+            except KeyboardInterrupt:
+                raise
+            if action == "APPROVE":
+                return "APPROVE"
+            if action == "CANCEL":
+                raise KeyboardInterrupt("User cancelled at plan review")
+            free_text = ui.text_input("Describe the change you want:")
+            return free_text or "APPROVE"
+
+        # With suggestions → single multi-select picker. Sentinel options
+        # ("describe", "cancel") sit alongside the actual suggestions so
+        # the user sees every available action in one place.
+        FREEFORM = "__FREEFORM__"
+        CANCEL = "__CANCEL__"
+        choices: List = [
+            (f"[{i}] {s.get('issue', '')[:80]}", i)
+            for i, s in enumerate(suggestions, 1)
+        ]
+        choices.append(("→ Describe changes in my own words instead", FREEFORM))
+        choices.append(("✕ Cancel run", CANCEL))
+
         try:
-            user_input = input(f"{C.BR_GREEN}> {C.RESET}").strip()
-        except EOFError:
+            picked = ui.checkbox(
+                "Select what to do — pick MULTIPLE suggestions to apply, or leave empty to approve as-is:",
+                choices,
+                instruction="(↑↓ move, Space to toggle, Enter to confirm)",
+            )
+        except KeyboardInterrupt:
+            raise
+
+        # CANCEL takes precedence over everything.
+        if CANCEL in picked:
+            raise KeyboardInterrupt("User cancelled at plan review")
+
+        # FREEFORM takes precedence over apply selections.
+        if FREEFORM in picked:
+            free_text = ui.text_input("Describe the change you want:")
+            return free_text or "APPROVE"
+
+        # Empty (or only sentinels filtered out) → approve.
+        suggestion_indices = [v for v in picked if isinstance(v, int)]
+        if not suggestion_indices:
             return "APPROVE"
-        if user_input == "" or user_input.lower() in ("go", "ok", "yes", "y", "approve"):
-            return "APPROVE"
-        if user_input.lower().startswith("apply"):
-            indices = user_input[len("apply"):].strip()
-            return f"Apply suggestion(s) {indices} from the critic list."
-        return user_input
+
+        indices_str = ",".join(str(i) for i in suggestion_indices)
+        return f"Apply suggestion(s) {indices_str} from the critic list."
 
     def plan_refinement_loop(self, task: str) -> Dict[str, Any]:
         """Plan → critique → user → refine, until approved or cap hit."""

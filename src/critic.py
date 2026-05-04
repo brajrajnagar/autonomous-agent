@@ -3,6 +3,7 @@
 import re
 from typing import Any, Dict, List, Optional
 
+import ui
 from prompts import CRITIC_REVIEW_PROMPT, system_prefix
 
 
@@ -39,15 +40,16 @@ class Critic:
         prompt = CRITIC_REVIEW_PROMPT.format(
             task=task, result=result, action_history=action_history,
         )
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prefix() + "You are a critical reviewer."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-            max_tokens=self.max_tokens,
-        )
+        with ui.thinking("Reviewing output"):
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prefix() + "You are a critical reviewer."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.3,
+                max_tokens=self.max_tokens,
+            )
         content = response.choices[0].message.content
         verdict = content.strip() if content else "APPROVED (no feedback generated)"
         if self.logger:

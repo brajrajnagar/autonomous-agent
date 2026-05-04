@@ -21,6 +21,7 @@ from openai import OpenAI
 _project_root = os.path.dirname(_script_dir)
 load_dotenv(os.path.join(_project_root, "config", ".env"))
 
+import ui
 from colors import C
 from context import make_context_manager
 from critic import Critic, is_approved
@@ -163,29 +164,60 @@ class AutonomousAgent:
 
         print(C.phase("\n--- CRITIC REVIEW ---"))
         critic_feedback = self.critic.review(task, result, self.state.action_history)
+        approved = is_approved(critic_feedback)
         print(f"{C.BOLD}Critic:{C.RESET} {critic_feedback}")
 
-        if is_approved(critic_feedback):
-            print(C.ok("✅ Output approved by critic"))
-        else:
-            print(C.warn("⚠️ Critic suggested improvements"))
+        if not approved:
             result += f"\n\n[Critic Feedback]: {critic_feedback}"
 
         report_path = self.logger.end(result, critic_feedback)
-        if report_path:
-            print(C.dim(f"\n📝 Session report: {report_path}"))
+
+        # End-of-run dashboard with aggregated stats from the session log.
+        ui.render_dashboard(self._collect_stats(task, approved, critic_feedback, report_path))
 
         return result
 
+    def _collect_stats(self, task, approved, critic_feedback, report_path):
+        """Gather stats from logger events + state for the dashboard."""
+        from collections import Counter
+        events = list(getattr(self.logger, "events", []) or [])
+        tool_counts: Counter = Counter()
+        replans = 0
+        compressions = 0
+        steps_total = len(self.state.plan.get("steps", [])) if self.state.plan else 0
+        steps_completed = 0
+        for e in events:
+            kind = e.kind if hasattr(e, "kind") else e.get("kind")
+            data = e.data if hasattr(e, "data") else e.get("data", {})
+            if kind == "tool_call":
+                t = data.get("tool")
+                if t:
+                    tool_counts[t] += 1
+            elif kind == "replan_decided":
+                replans += 1
+            elif kind == "context_compressed":
+                compressions += 1
+            elif kind == "step_complete" and data.get("completed"):
+                steps_completed += 1
+        duration = events[-1].elapsed_s if events and hasattr(events[-1], "elapsed_s") else 0.0
+        # Critic summary: first ~200 chars of the verdict.
+        critic_summary = (critic_feedback or "").strip().splitlines()[0] if critic_feedback else ""
+        return {
+            "task": task,
+            "approved": approved,
+            "duration_s": duration,
+            "steps_total": steps_total,
+            "steps_completed": steps_completed,
+            "replans": replans,
+            "compressions": compressions,
+            "tool_counts": dict(tool_counts),
+            "critic_summary": critic_summary,
+            "log_path": str(report_path) if report_path else "",
+        }
+
     def _print_plan_summary(self, plan):
         """Print the plan compactly without prompting (used by 'standard' mode)."""
-        print(C.phase("\n📋 Plan (auto-approved):"))
-        summary = plan.get("summary", "")
-        if summary:
-            print(f"{C.BOLD}Summary:{C.RESET} {summary}")
-        for step in plan.get("steps", []):
-            print(f"  {C.step(str(step['id']) + '.')} {step['description']}")
-        print()
+        ui.render_plan(plan, suggestions=None, title="📋 Plan (auto-approved)")
 
 
 # Re-export for backward compatibility with `from agent import AutonomousAgent`.

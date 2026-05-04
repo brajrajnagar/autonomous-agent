@@ -21,6 +21,7 @@ operates on whatever list is currently held.
 import json
 from typing import Any, Dict, List, Optional
 
+import ui
 from colors import C
 from parsing import hash_action, parse_xml_tool_calls
 from prompts import system_prefix
@@ -91,10 +92,7 @@ class Executor:
                 # Header + step_start log only on the first attempt; later
                 # attempts print a clear "retry" / "revised" banner instead.
                 if attempt == 1:
-                    print(C.step(f"\n{'━' * 60}"))
-                    print(C.step(f"▶️  STEP {step['id']}/{len(steps)}:") + f" {step.get('description', '')}")
-                    print(f"   {C.dim('Success:')} {C.dim(step.get('success_criterion', ''))}")
-                    print(C.step(f"{'━' * 60}"))
+                    ui.render_step_header(step, cursor + 1, len(steps))
                     if self.logger:
                         self.logger.log("step_start", {
                             "step_id": step.get("id"),
@@ -264,25 +262,27 @@ class Executor:
         return "\n\n".join(step_results)
 
     def _prompt_user_for_replan(self, decision: Dict[str, Any]) -> str:
-        """Show the planner's recommendation and let the user override.
+        """Let the user accept or override the planner's recovery action.
 
-        Returns the final action string. Used only when autonomy='interactive'.
+        Returns one of: "retry", "revise_step", "revise_plan", "skip", "abort".
+        Used only when autonomy='interactive'. On non-TTY, falls back to a
+        numbered text prompt; an unrecognized choice defers to the planner.
         """
         action = decision.get("action", "abort")
         reasoning = decision.get("reasoning", "")
-        print(C.hint(f"\nPlanner suggests: {action} — {reasoning}"))
-        print(C.dim(
-            "Type 'go' / Enter to accept, or one of: retry, skip, abort"
-        ))
         try:
-            user_input = input(f"{C.BR_GREEN}> {C.RESET}").strip().lower()
-        except EOFError:
-            return action
-        if user_input in ("", "go", "ok", "yes", "y"):
-            return action
-        if user_input in ("retry", "skip", "abort"):
-            return user_input
-        return action  # fall back to planner's choice on unrecognized input
+            return ui.choose(
+                f"Planner suggests '{action}' — {reasoning}\nWhat should we do?",
+                [
+                    (f"Accept planner's choice: {action}", action),
+                    ("Retry the same step", "retry"),
+                    ("Skip this step", "skip"),
+                    ("Abort the run", "abort"),
+                ],
+                default=action,
+            )
+        except KeyboardInterrupt:
+            return "abort"
 
     def legacy_execute(self, state: AgentState, task: str) -> str:
         """No-plan path: a single T-A-O loop with a fresh messages list."""
@@ -315,7 +315,6 @@ class Executor:
             state.iteration_count += 1
 
             print(C.phase(f"\n--- Iteration {state.iteration_count} ---"))
-            print(C.label("THINKING..."))
             if self.logger:
                 self.logger.log("iteration", {
                     "step_id": step_id, "iteration": state.iteration_count,
@@ -326,14 +325,15 @@ class Executor:
             if self.context:
                 self._messages = self.context.maybe_compress(self._messages, state)
 
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=self._messages,
-                tools=TOOL_DEFINITIONS,
-                tool_choice="auto",
-                temperature=0.7,
-                max_tokens=self.max_tokens_tao,
-            )
+            with ui.thinking(f"Iteration {state.iteration_count} thinking"):
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=self._messages,
+                    tools=TOOL_DEFINITIONS,
+                    tool_choice="auto",
+                    temperature=0.7,
+                    max_tokens=self.max_tokens_tao,
+                )
             msg = response.choices[0].message
 
             # Capture model's natural-language explanation (if any) as the "thought".
